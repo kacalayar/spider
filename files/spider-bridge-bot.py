@@ -14,6 +14,7 @@ ENV_FILE = "/etc/spider-bridge/config.env"
 APPLY_CMD = "/usr/local/sbin/spider-bridge-apply"
 STATE_DIR = "/var/lib/spider-bridge"
 COUNTRIES_CACHE_FILE = os.path.join(STATE_DIR, "countries.json")
+UPDATE_OFFSET_FILE = os.path.join(STATE_DIR, "telegram_update_offset")
 COUNTRY_SOURCE_URL = "https://spider.cloud/proxy-locations"
 COUNTRY_CACHE_TTL_SECONDS = 24 * 60 * 60
 COUNTRY_PAGE_SIZE = 40
@@ -149,6 +150,27 @@ def write_countries_cache(countries):
         handle.write("\n")
     os.chmod(tmp_path, 0o644)
     os.replace(tmp_path, COUNTRIES_CACHE_FILE)
+
+
+def read_update_offset():
+    try:
+        with open(UPDATE_OFFSET_FILE, "r", encoding="utf-8") as handle:
+            value = handle.read().strip()
+    except OSError:
+        return None
+
+    if not value.isdigit():
+        return None
+    return int(value)
+
+
+def write_update_offset(offset):
+    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+    tmp_path = UPDATE_OFFSET_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        handle.write(f"{int(offset)}\n")
+    os.chmod(tmp_path, 0o644)
+    os.replace(tmp_path, UPDATE_OFFSET_FILE)
 
 
 def fetch_spider_countries():
@@ -946,7 +968,7 @@ def main():
     except Exception as exc:
         log(f"Unable to set Telegram commands: {exc}")
 
-    offset = None
+    offset = read_update_offset()
     while True:
         try:
             payload = {
@@ -959,6 +981,7 @@ def main():
             updates = telegram_api(token, "getUpdates", payload, timeout=40) or []
             for update in updates:
                 offset = update["update_id"] + 1
+                write_update_offset(offset)
                 try:
                     handle_update(token, update)
                 except Exception as exc:

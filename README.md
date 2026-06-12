@@ -243,6 +243,11 @@ dan upstream masih `http://proxy.spider.cloud:8888`, ganti ke endpoint HTTPS:
 /status
 ```
 
+Jika bot berulang mengirim pesan `Menerapkan upstream...` tanpa command baru,
+upgrade ke versi terbaru. Versi lama membuat service bot bergantung langsung
+pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
+`/setupstream` dan Telegram mengirim ulang update lama.
+
 ## Command Bot
 
 ```text

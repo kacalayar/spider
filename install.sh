@@ -493,7 +493,6 @@ write_systemd_service() {
 Description=Spider Bridge Telegram Bot
 After=network-online.target squid.service
 Wants=network-online.target
-Requires=squid.service
 
 [Service]
 Type=simple
