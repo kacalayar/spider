@@ -48,6 +48,7 @@ sudo bash /tmp/spider-bridge-install.sh \
   --proxy-user "myuser" \
   --proxy-pass "mypassword" \
   --port 3128 \
+  --swap-size-gb 2 \
   --country ID \
   --pool residential
 ```
@@ -70,12 +71,47 @@ sudo bash install.sh \
   --proxy-user "myuser" \
   --proxy-pass "mypassword" \
   --port 3128 \
+  --swap-size-gb 2 \
   --country ID \
   --pool residential
 ```
 
 Jika tidak mengisi `--telegram-admin-ids`, installer mencetak token `/claim`.
 Kirim `/claim TOKEN` ke bot Telegram untuk menjadi admin pertama.
+
+## Swap
+
+Installer menawarkan pembuatan swap file secara interaktif. Default-nya `2 GB`,
+cocok untuk VPS RAM 2 GB. Isi `0` jika ingin skip.
+
+Jika VPS sudah punya swap aktif, installer tidak membuat swap baru.
+
+Non-interaktif:
+
+```bash
+sudo bash install.sh --swap-size-gb 2 ...
+```
+
+Disable swap creation:
+
+```bash
+sudo bash install.sh --no-swap ...
+```
+
+Path default swap file:
+
+```text
+/swapfile
+```
+
+Jika ingin path lain:
+
+```bash
+sudo bash install.sh --swap-file /swapfile-spider --swap-size-gb 4 ...
+```
+
+Swap yang dibuat installer ditandai di `/etc/fstab` dengan
+`spider-bridge-swap`, sehingga uninstaller bisa mengenalinya.
 
 ## Country List
 
@@ -184,6 +220,7 @@ Opsi berguna:
 ```text
 --keep-config
 --keep-state
+--keep-swap
 --no-restore-squid
 --no-stop-squid
 ```

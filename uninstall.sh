@@ -14,6 +14,7 @@ ASSUME_YES=0
 DRY_RUN=0
 KEEP_CONFIG=0
 KEEP_STATE=0
+KEEP_SWAP=0
 RESTORE_SQUID=1
 PURGE_PACKAGES=0
 STOP_SQUID=1
@@ -37,6 +38,7 @@ Options:
   --dry-run              Print actions without changing the system
   --keep-config          Keep /etc/spider-bridge
   --keep-state           Keep /var/lib/spider-bridge
+  --keep-swap            Keep swap file created by the installer
   --no-restore-squid     Do not restore pre-install Squid backup
   --no-stop-squid        Do not stop/disable Squid even when config is managed
   --purge-packages       Apt purge squid and apache2-utils after removing bridge
@@ -48,6 +50,7 @@ Default behavior:
   - Remove /opt/spider-bridge and spider-bridge helper commands.
   - Remove /etc/spider-bridge and /var/lib/spider-bridge unless kept.
   - Remove /etc/squid/spider_bridge_users.
+  - Remove swap files marked with "spider-bridge-swap" in /etc/fstab unless kept.
   - If /etc/squid/squid.conf is managed by spider-bridge, save it, then restore
     the newest /etc/squid/squid.conf.pre-spider-bridge.* backup when available.
   - Packages are not removed unless --purge-packages is used.
@@ -145,6 +148,52 @@ restore_or_stop_squid() {
   fi
 }
 
+managed_swap_files() {
+  [[ -f /etc/fstab ]] || return 0
+  awk '$0 ~ /spider-bridge-swap/ && $3 == "swap" {print $1}' /etc/fstab
+}
+
+swap_file_is_active() {
+  local path="$1"
+  awk -v target="$path" 'NR > 1 && $1 == target {found=1} END {exit found ? 0 : 1}' /proc/swaps
+}
+
+remove_managed_swap() {
+  [[ "$KEEP_SWAP" == "1" ]] && {
+    log "Keeping swap file created by spider-bridge"
+    return 0
+  }
+
+  local found=0
+  local swap_path
+  while IFS= read -r swap_path; do
+    [[ -n "$swap_path" ]] || continue
+    found=1
+    log "Removing managed swap: ${swap_path}"
+
+    if swap_file_is_active "$swap_path"; then
+      run swapoff "$swap_path" || log "swapoff failed for ${swap_path}"
+    fi
+
+    if [[ -f "$swap_path" ]]; then
+      remove_path "$swap_path"
+    fi
+  done < <(managed_swap_files)
+
+  [[ "$found" == "1" ]] || return 0
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "DRY-RUN: would remove spider-bridge-swap entries from /etc/fstab"
+    return 0
+  fi
+
+  local tmp_file
+  tmp_file="$(mktemp)"
+  awk '$0 !~ /spider-bridge-swap/' /etc/fstab >"$tmp_file"
+  cp "$tmp_file" /etc/fstab
+  rm -f "$tmp_file"
+}
+
 purge_packages() {
   [[ "$PURGE_PACKAGES" == "1" ]] || return 0
 
@@ -196,6 +245,10 @@ parse_args() {
         ;;
       --keep-state)
         KEEP_STATE=1
+        shift
+        ;;
+      --keep-swap)
+        KEEP_SWAP=1
         shift
         ;;
       --no-restore-squid)
@@ -251,6 +304,7 @@ main() {
   fi
 
   restore_or_stop_squid
+  remove_managed_swap
   daemon_reload
   purge_packages
 

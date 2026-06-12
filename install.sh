@@ -8,7 +8,8 @@ BOT_FILE="${BOT_DIR}/bot.py"
 APPLY_FILE="/usr/local/sbin/spider-bridge-apply"
 UNINSTALL_FILE="/usr/local/sbin/spider-bridge-uninstall"
 SYSTEMD_FILE="/etc/systemd/system/spider-bridge-bot.service"
-REPO_RAW_URL="${SPIDER_BRIDGE_REPO_RAW_URL:-https://raw.githubusercontent.com/kacalayar/spider/main}"
+REPO_RAW_URL="${REPO_RAW_URL:-${SPIDER_BRIDGE_REPO_RAW_URL:-https://raw.githubusercontent.com/kacalayar/spider/main}}"
+SWAP_FILE="${SWAP_FILE:-${SPIDER_BRIDGE_SWAP_FILE:-/swapfile}}"
 TMP_DIR=""
 
 NON_INTERACTIVE=0
@@ -49,6 +50,9 @@ Options:
   --vps-public-ip VALUE        Public IP shown by /showproxy, default: auto-detect
   --extra-param VALUE          Optional single extra Spider password param, example: session=abc
   --repo-raw-url VALUE         Raw GitHub base URL for remote install files
+  --swap-size-gb VALUE         Swap file size in GB, default: 2, use 0 to skip
+  --swap-file VALUE            Swap file path, default: /swapfile
+  --no-swap                    Do not create or enable a swap file
   --non-interactive            Fail instead of prompting for required values
   --no-open-ufw                Do not auto-open UFW port when UFW is active
   -h, --help                   Show this help
@@ -162,6 +166,24 @@ validate_extra_param() {
   [[ -z "$value" || "$value" =~ ^[A-Za-z0-9._~=%:+/-]+$ ]] || die "SPIDER_EXTRA_PARAMS supports one shell-safe param only, example: session=abc"
 }
 
+validate_swap_size() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "SWAP_SIZE_GB must be a whole number from 0 to 64"
+  (( value >= 0 && value <= 64 )) || die "SWAP_SIZE_GB must be between 0 and 64"
+}
+
+validate_swap_file() {
+  local value="$1"
+  [[ -n "$value" ]] || die "SWAP_FILE cannot be empty"
+  [[ "$value" == /* ]] || die "SWAP_FILE must be an absolute path"
+  [[ "$value" != *[[:space:]]* ]] || die "SWAP_FILE cannot contain whitespace"
+  case "$value" in
+    "/"|"/dev"|"/dev/"*|"/proc"|"/proc/"*|"/sys"|"/sys/"*|"/run"|"/run/"*)
+      die "Refusing unsafe SWAP_FILE path: $value"
+      ;;
+  esac
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -213,6 +235,18 @@ parse_args() {
         REPO_RAW_URL="$2"
         shift 2
         ;;
+      --swap-size-gb)
+        SWAP_SIZE_GB="$2"
+        shift 2
+        ;;
+      --swap-file)
+        SWAP_FILE="$2"
+        shift 2
+        ;;
+      --no-swap)
+        SWAP_SIZE_GB=0
+        shift
+        ;;
       --non-interactive)
         NON_INTERACTIVE=1
         shift
@@ -253,6 +287,68 @@ validate_values() {
   validate_country_param "$SPIDER_COUNTRY_PARAM"
   validate_admin_ids "$TELEGRAM_ADMIN_IDS"
   validate_extra_param "$SPIDER_EXTRA_PARAMS"
+  validate_swap_size "$SWAP_SIZE_GB"
+  validate_swap_file "$SWAP_FILE"
+}
+
+active_swap_exists() {
+  awk 'NR > 1 {found=1} END {exit found ? 0 : 1}' /proc/swaps
+}
+
+swap_file_is_active() {
+  local path="$1"
+  awk -v target="$path" 'NR > 1 && $1 == target {found=1} END {exit found ? 0 : 1}' /proc/swaps
+}
+
+fstab_has_swap_file() {
+  local path="$1"
+  awk -v target="$path" '$1 == target && $3 == "swap" {found=1} END {exit found ? 0 : 1}' /etc/fstab 2>/dev/null
+}
+
+ensure_swap_file() {
+  [[ "$SWAP_SIZE_GB" == "0" ]] && {
+    log "Swap creation skipped"
+    return 0
+  }
+
+  if swap_file_is_active "$SWAP_FILE"; then
+    log "Swap file already active: ${SWAP_FILE}"
+    return 0
+  fi
+
+  if active_swap_exists; then
+    log "An active swap device/file already exists; skipping new swap creation"
+    return 0
+  fi
+
+  if [[ -e "$SWAP_FILE" ]]; then
+    die "${SWAP_FILE} already exists but is not active swap. Remove it manually or use --swap-file."
+  fi
+
+  local swap_dir
+  swap_dir="$(dirname "$SWAP_FILE")"
+  [[ -d "$swap_dir" ]] || die "Swap directory does not exist: $swap_dir"
+
+  local required_kb available_kb
+  required_kb=$((SWAP_SIZE_GB * 1024 * 1024))
+  available_kb="$(df -Pk "$swap_dir" | awk 'NR == 2 {print $4}')"
+  [[ "$available_kb" =~ ^[0-9]+$ ]] || die "Could not determine free disk space for $swap_dir"
+  (( available_kb > required_kb + 262144 )) || die "Not enough disk space for ${SWAP_SIZE_GB}GB swap at $SWAP_FILE"
+
+  log "Creating ${SWAP_SIZE_GB}GB swap file at ${SWAP_FILE}"
+  if ! fallocate -l "${SWAP_SIZE_GB}G" "$SWAP_FILE" 2>/dev/null; then
+    dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$((SWAP_SIZE_GB * 1024)) status=progress
+  fi
+
+  chmod 600 "$SWAP_FILE"
+  mkswap "$SWAP_FILE" >/dev/null
+  swapon "$SWAP_FILE"
+
+  if ! fstab_has_swap_file "$SWAP_FILE"; then
+    printf '%s none swap sw 0 0 # spider-bridge-swap\n' "$SWAP_FILE" >>/etc/fstab
+  fi
+
+  log "Swap enabled: ${SWAP_FILE}"
 }
 
 install_packages() {
@@ -392,6 +488,9 @@ Proxy service:
   systemctl status squid --no-pager
   /usr/local/sbin/spider-bridge-apply
 
+Swap:
+  requested ${SWAP_SIZE_GB}GB at ${SWAP_FILE}
+
 Uninstall:
   sudo spider-bridge-uninstall
 EOF
@@ -423,6 +522,7 @@ main() {
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE:-}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM:-country_code}"
   SPIDER_EXTRA_PARAMS="${SPIDER_EXTRA_PARAMS:-}"
+  SWAP_SIZE_GB="${SWAP_SIZE_GB:-${SPIDER_BRIDGE_SWAP_SIZE_GB:-}}"
   SPIDER_UPSTREAM_HOST="${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}"
   SPIDER_UPSTREAM_PORT="${SPIDER_UPSTREAM_PORT:-8888}"
   VPS_PUBLIC_IP="${VPS_PUBLIC_IP:-}"
@@ -438,6 +538,7 @@ main() {
   prompt_if_empty LOCAL_PROXY_PORT "Local proxy port" "3128" 0 1
   prompt_if_empty SPIDER_PROXY_TYPE "Spider proxy pool" "residential" 0 1
   prompt_if_empty SPIDER_COUNTRY_CODE "Spider country code, or off" "US" 0 0
+  prompt_if_empty SWAP_SIZE_GB "Swap size in GB (0 to skip)" "2" 0 0
 
   normalize_values
   validate_values
@@ -448,6 +549,7 @@ main() {
     SETUP_TOKEN=""
   fi
 
+  ensure_swap_file
   install_packages
   detect_public_ip
   install_project_files
