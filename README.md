@@ -203,6 +203,31 @@ sudo bash install.sh \
 Installer akan menambahkan opsi `tls` pada `cache_peer` Squid untuk mode
 `https`.
 
+Upstream juga bisa diganti dari Telegram setelah bot versi terbaru terpasang:
+
+```text
+/setupstream https
+/setupstream http
+/setupstream https 8889
+```
+
+## Live Proxy Check
+
+Perintah `/status` dan `/test` melakukan request live lewat proxy lokal ke
+`https://api.ipify.org?format=json`. Output akan menampilkan:
+
+```text
+Proxy live check: OK/FAIL
+Exit IP via local proxy: ...
+Direct VPS IP: ...
+Exit comparison: DIFFERENT_FROM_VPS/SAME_AS_VPS
+```
+
+Jika `Proxy live check` gagal, chain `client -> VPS Squid -> Spider` belum
+berhasil. Jika `Exit IP via local proxy` sama dengan `Direct VPS IP`, traffic
+belum keluar dengan IP berbeda dari VPS atau upstream Spider sedang memberi
+exit yang sama menurut target pengecekan.
+
 ## Command Bot
 
 ```text
@@ -214,6 +239,7 @@ Installer akan menambahkan opsi `tls` pada `cache_peer` Squid untuk mode
 /setcountry off
 /setproxy residential
 /setcountryparam country_code
+/setupstream https
 /showproxy
 /test
 /apply

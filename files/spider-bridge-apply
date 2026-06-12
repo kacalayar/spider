@@ -201,7 +201,9 @@ main() {
   validate_country "$SPIDER_COUNTRY_CODE"
   validate_country_param "$SPIDER_COUNTRY_PARAM"
   validate_upstream_scheme "$SPIDER_UPSTREAM_SCHEME"
-  validate_port "${SPIDER_UPSTREAM_PORT:-8888}"
+  if [[ -n "${SPIDER_UPSTREAM_PORT:-}" ]]; then
+    validate_port "$SPIDER_UPSTREAM_PORT"
+  fi
   validate_extra_params "$SPIDER_EXTRA_PARAMS"
 
   local upstream_password

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ENV_FILE = "/etc/spider-bridge/config.env"
@@ -16,6 +17,7 @@ COUNTRIES_CACHE_FILE = os.path.join(STATE_DIR, "countries.json")
 COUNTRY_SOURCE_URL = "https://spider.cloud/proxy-locations"
 COUNTRY_CACHE_TTL_SECONDS = 24 * 60 * 60
 COUNTRY_PAGE_SIZE = 40
+IP_CHECK_URL = "https://api.ipify.org?format=json"
 
 PROXY_TYPES = [
     "residential",
@@ -57,6 +59,7 @@ Perintah:
 /setcountry off - pakai default Spider
 /setcountryparam country_code - pilih parameter country_code atau country
 /setproxy residential - ubah pool Spider
+/setupstream https - ubah upstream Spider ke http/https
 /showproxy - tampilkan format ip:port:user:pass
 /test - test proxy lokal via Spider
 /apply - tulis ulang config dan restart Squid
@@ -272,6 +275,29 @@ def valid_country_param(value):
     return value in {"country", "country_code"}
 
 
+def valid_upstream_scheme(value):
+    return value in {"http", "https"}
+
+
+def default_upstream_port(scheme):
+    return "8889" if scheme == "https" else "8888"
+
+
+def upstream_scheme(env):
+    scheme = env.get("SPIDER_UPSTREAM_SCHEME", "http").lower()
+    return scheme if valid_upstream_scheme(scheme) else "http"
+
+
+def upstream_port(env):
+    return env.get("SPIDER_UPSTREAM_PORT") or default_upstream_port(upstream_scheme(env))
+
+
+def upstream_endpoint(env):
+    scheme = upstream_scheme(env)
+    host = env.get("SPIDER_UPSTREAM_HOST", "proxy.spider.cloud")
+    return f"{scheme}://{host}:{upstream_port(env)}"
+
+
 def build_keyboard(kind):
     if kind == "pools":
         rows = []
@@ -344,19 +370,105 @@ def proxy_line(env):
     return f"{host}:{env.get('LOCAL_PROXY_PORT', '3128')}:{env.get('LOCAL_PROXY_USER', 'proxyuser')}:{env.get('LOCAL_PROXY_PASS', '<password>')}"
 
 
+def local_proxy_url(env):
+    user = urllib.parse.quote(env.get("LOCAL_PROXY_USER", ""), safe="")
+    password = urllib.parse.quote(env.get("LOCAL_PROXY_PASS", ""), safe="")
+    port = env.get("LOCAL_PROXY_PORT", "3128")
+    return f"http://{user}:{password}@127.0.0.1:{port}"
+
+
+def fetch_ip(opener, timeout):
+    request = urllib.request.Request(
+        IP_CHECK_URL,
+        headers={"User-Agent": "spider-bridge-bot/1.0"},
+    )
+    try:
+        if opener is None:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read(4096).decode("utf-8", errors="replace")
+        else:
+            with opener.open(request, timeout=timeout) as response:
+                body = response.read(4096).decode("utf-8", errors="replace")
+    except Exception as exc:
+        return {"ok": False, "ip": "", "raw": "", "error": str(exc)}
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return {"ok": True, "ip": "", "raw": body.strip(), "error": "response is not JSON"}
+
+    ip = str(payload.get("ip", "")).strip()
+    return {"ok": True, "ip": ip, "raw": body.strip(), "error": ""}
+
+
+def proxy_live_check(env, include_direct=True):
+    proxy_handler = urllib.request.ProxyHandler(
+        {
+            "http": local_proxy_url(env),
+            "https": local_proxy_url(env),
+        }
+    )
+    proxy_opener = urllib.request.build_opener(proxy_handler)
+    proxied = fetch_ip(proxy_opener, timeout=25)
+
+    direct = None
+    if include_direct:
+        direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        direct = fetch_ip(direct_opener, timeout=12)
+
+    return {"proxied": proxied, "direct": direct}
+
+
+def format_live_check(check):
+    proxied = check["proxied"]
+    direct = check.get("direct")
+
+    if proxied["ok"] and proxied["ip"]:
+        lines = [
+            "Proxy live check: <code>OK</code>",
+            f"Exit IP via local proxy: <code>{escape(proxied['ip'])}</code>",
+        ]
+    elif proxied["ok"]:
+        lines = [
+            "Proxy live check: <code>UNKNOWN</code>",
+            f"Proxy response: <code>{escape(proxied['raw'] or proxied['error'] or 'empty response')}</code>",
+        ]
+    else:
+        lines = [
+            "Proxy live check: <code>FAIL</code>",
+            f"Proxy error: <code>{escape(proxied['error'])}</code>",
+        ]
+
+    if direct:
+        if direct["ok"] and direct["ip"]:
+            lines.append(f"Direct VPS IP: <code>{escape(direct['ip'])}</code>")
+            if proxied["ok"] and proxied["ip"]:
+                if proxied["ip"] == direct["ip"]:
+                    lines.append("Exit comparison: <code>SAME_AS_VPS</code>")
+                else:
+                    lines.append("Exit comparison: <code>DIFFERENT_FROM_VPS</code>")
+        elif not direct["ok"]:
+            lines.append(f"Direct VPS IP: <code>unavailable ({escape(direct['error'])})</code>")
+
+    return "\n".join(lines)
+
+
 def status_text(env):
     country = env.get("SPIDER_COUNTRY_CODE") or "default"
+    check = proxy_live_check(env, include_direct=True)
     return f"""<b>Spider Bridge Status</b>
 
 Squid: <code>{escape(service_state("squid"))}</code>
 Bot: <code>{escape(service_state("spider-bridge-bot"))}</code>
+
+{format_live_check(check)}
 
 Local proxy: <code>{escape((env.get("VPS_PUBLIC_IP") or "<VPS_IP>") + ":" + env.get("LOCAL_PROXY_PORT", "3128"))}</code>
 Local user: <code>{escape(env.get("LOCAL_PROXY_USER", ""))}</code>
 Spider pool: <code>{escape(env.get("SPIDER_PROXY_TYPE", "residential"))}</code>
 Spider country: <code>{escape(country)}</code>
 Spider country param: <code>{escape(env.get("SPIDER_COUNTRY_PARAM", "country_code"))}</code>
-Spider upstream: <code>{escape(env.get("SPIDER_UPSTREAM_SCHEME", "http") + "://" + env.get("SPIDER_UPSTREAM_HOST", "proxy.spider.cloud") + ":" + env.get("SPIDER_UPSTREAM_PORT", "8888"))}</code>
+Spider upstream: <code>{escape(upstream_endpoint(env))}</code>
 """
 
 
@@ -369,6 +481,7 @@ def set_my_commands(token):
         {"command": "setcountry", "description": "Set country code"},
         {"command": "setcountryparam", "description": "Set country or country_code param"},
         {"command": "setproxy", "description": "Set Spider pool"},
+        {"command": "setupstream", "description": "Set Spider upstream http/https"},
         {"command": "showproxy", "description": "Show ip:port:user:pass"},
         {"command": "test", "description": "Test local proxy"},
         {"command": "apply", "description": "Restart proxy with current config"},
@@ -479,27 +592,41 @@ def handle_set_proxy(token, chat, env, value):
         send_message(token, chat, f"Gagal apply config:\n<code>{escape(output)}</code>")
 
 
-def handle_test(token, chat, env):
-    proxy_url = (
-        "http://"
-        + env.get("LOCAL_PROXY_USER", "")
-        + ":"
-        + env.get("LOCAL_PROXY_PASS", "")
-        + "@127.0.0.1:"
-        + env.get("LOCAL_PROXY_PORT", "3128")
-    )
-    result = subprocess.run(
-        ["curl", "-fsS", "--max-time", "25", "-x", proxy_url, "https://api.ipify.org?format=json"],
-        capture_output=True,
-        text=True,
-        timeout=35,
-        check=False,
-    )
-    output = (result.stdout + "\n" + result.stderr).strip()
-    if result.returncode == 0:
-        send_message(token, chat, f"Test berhasil:\n<code>{escape(output)}</code>")
+def handle_set_upstream(token, chat, env, args):
+    if not args:
+        send_message(token, chat, "Contoh: <code>/setupstream https</code> atau <code>/setupstream http 8888</code>")
+        return
+
+    scheme = args[0].lower()
+    if not valid_upstream_scheme(scheme):
+        send_message(token, chat, "Upstream scheme harus <code>http</code> atau <code>https</code>.")
+        return
+
+    port = args[1] if len(args) > 1 else default_upstream_port(scheme)
+    if not valid_port(port):
+        send_message(token, chat, "Port upstream harus angka 1-65535.")
+        return
+
+    env["SPIDER_UPSTREAM_SCHEME"] = scheme
+    env["SPIDER_UPSTREAM_PORT"] = port
+    save_env(env)
+
+    ok, output = run_apply()
+    if ok:
+        send_message(
+            token,
+            chat,
+            f"Upstream Spider diubah ke <code>{escape(upstream_endpoint(env))}</code>.\n"
+            f"<code>{escape(output)}</code>\n\n"
+            "Jalankan <code>/status</code> untuk melihat exit IP live.",
+        )
     else:
-        send_message(token, chat, f"Test gagal:\n<code>{escape(output[-1800:])}</code>")
+        send_message(token, chat, f"Gagal apply upstream:\n<code>{escape(output)}</code>")
+
+
+def handle_test(token, chat, env):
+    check = proxy_live_check(env, include_direct=True)
+    send_message(token, chat, f"<b>Proxy Test</b>\n\n{format_live_check(check)}")
 
 
 def handle_countries(token, chat, page=0, force_refresh=False):
@@ -561,6 +688,10 @@ def handle_admin_command(token, update, env, command, args):
             send_message(token, chat, "Contoh: <code>/setproxy residential</code>")
             return
         handle_set_proxy(token, chat, env, args[0])
+        return
+
+    if command == "/setupstream":
+        handle_set_upstream(token, chat, env, args)
         return
 
     if command == "/showproxy":
