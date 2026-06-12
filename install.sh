@@ -10,6 +10,7 @@ UNINSTALL_FILE="/usr/local/sbin/spider-bridge-uninstall"
 SYSTEMD_FILE="/etc/systemd/system/spider-bridge-bot.service"
 REPO_RAW_URL="${REPO_RAW_URL:-${SPIDER_BRIDGE_REPO_RAW_URL:-https://raw.githubusercontent.com/kacalayar/spider/main}}"
 SWAP_FILE="${SWAP_FILE:-${SPIDER_BRIDGE_SWAP_FILE:-/swapfile}}"
+GOST_MARKER="${ENV_DIR}/gost-installed-by-spider-bridge"
 TMP_DIR=""
 
 NON_INTERACTIVE=0
@@ -44,15 +45,16 @@ Options:
   --proxy-user VALUE           Local proxy username, default: proxyuser
   --proxy-pass VALUE           Local proxy password, default: generated
   --port VALUE                 Local proxy port, default: 3128
+  --bridge-engine VALUE        Bridge engine: squid or gost, default: squid
   --country VALUE              Spider country code, default: US, use off for default
   --country-param VALUE        Spider country parameter: country_code or country, default: country_code
   --pool VALUE                 Spider proxy pool, default: residential
   --vps-public-ip VALUE        Public IP shown by /showproxy, default: auto-detect
   --extra-param VALUE          Optional single extra Spider password param, example: session=abc
   --repo-raw-url VALUE         Raw GitHub base URL for remote install files
-  --spider-upstream-scheme VALUE  Spider upstream scheme: http or https, default: http
+  --spider-upstream-scheme VALUE  Spider upstream scheme: http, https, or socks5
   --spider-upstream-host VALUE    Spider upstream host, default: proxy.spider.cloud
-  --spider-upstream-port VALUE    Spider upstream port, default: 8888 for http, 8889 for https
+  --spider-upstream-port VALUE    Spider upstream port, default: 8888 http, 8889 https, 8887 socks5
   --swap-size-gb VALUE         Swap file size in GB, default: 2, use 0 to skip
   --swap-file VALUE            Swap file path, default: /swapfile
   --no-swap                    Do not create or enable a swap file
@@ -126,7 +128,7 @@ load_existing_config_defaults() {
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     [[ -n "$key" && "$key" != \#* ]] || continue
     case "$key" in
-      SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_SCHEME|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT|VPS_PUBLIC_IP|TELEGRAM_BOT_TOKEN|TELEGRAM_ADMIN_IDS)
+      BRIDGE_ENGINE|SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_SCHEME|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT|VPS_PUBLIC_IP|TELEGRAM_BOT_TOKEN|TELEGRAM_ADMIN_IDS)
         if [[ -z "${!key:-}" ]]; then
           printf -v "$key" '%s' "$value"
         fi
@@ -167,11 +169,33 @@ validate_country_param() {
   esac
 }
 
+validate_bridge_engine() {
+  local value="$1"
+  case "$value" in
+    squid|gost) ;;
+    *) die "BRIDGE_ENGINE must be squid or gost" ;;
+  esac
+}
+
 validate_upstream_scheme() {
   local value="$1"
   case "$value" in
-    http|https) ;;
-    *) die "SPIDER_UPSTREAM_SCHEME must be http or https" ;;
+    http|https|socks5) ;;
+    *) die "SPIDER_UPSTREAM_SCHEME must be http, https, or socks5" ;;
+  esac
+}
+
+validate_engine_upstream_pair() {
+  if [[ "$BRIDGE_ENGINE" == "squid" && "$SPIDER_UPSTREAM_SCHEME" == "socks5" ]]; then
+    die "Squid engine cannot use socks5 upstream. Use --bridge-engine gost for Spider SOCKS5."
+  fi
+}
+
+default_upstream_port() {
+  case "$1" in
+    https) printf '8889\n' ;;
+    socks5) printf '8887\n' ;;
+    *) printf '8888\n' ;;
   esac
 }
 
@@ -245,6 +269,10 @@ parse_args() {
         LOCAL_PROXY_PORT="$2"
         shift 2
         ;;
+      --bridge-engine)
+        BRIDGE_ENGINE="$2"
+        shift 2
+        ;;
       --country)
         SPIDER_COUNTRY_CODE="$2"
         shift 2
@@ -313,6 +341,7 @@ parse_args() {
 }
 
 normalize_values() {
+  BRIDGE_ENGINE="${BRIDGE_ENGINE,,}"
   SPIDER_PROXY_TYPE="${SPIDER_PROXY_TYPE,,}"
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE^^}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM,,}"
@@ -329,10 +358,12 @@ validate_values() {
   validate_local_credential "LOCAL_PROXY_USER" "$LOCAL_PROXY_USER"
   validate_local_credential "LOCAL_PROXY_PASS" "$LOCAL_PROXY_PASS"
   validate_port "$LOCAL_PROXY_PORT"
+  validate_bridge_engine "$BRIDGE_ENGINE"
   validate_proxy_type "$SPIDER_PROXY_TYPE"
   validate_country "$SPIDER_COUNTRY_CODE"
   validate_country_param "$SPIDER_COUNTRY_PARAM"
   validate_upstream_scheme "$SPIDER_UPSTREAM_SCHEME"
+  validate_engine_upstream_pair
   validate_upstream_host "$SPIDER_UPSTREAM_HOST"
   validate_port "$SPIDER_UPSTREAM_PORT"
   validate_admin_ids "$TELEGRAM_ADMIN_IDS"
@@ -405,7 +436,65 @@ install_packages() {
   log "Installing Ubuntu packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y squid apache2-utils curl python3 openssl ca-certificates
+  apt-get install -y squid apache2-utils curl python3 openssl ca-certificates tar
+}
+
+install_gost_binary() {
+  [[ "$BRIDGE_ENGINE" == "gost" ]] || return 0
+
+  if command -v gost >/dev/null 2>&1; then
+    log "GOST already installed: $(command -v gost)"
+    return 0
+  fi
+
+  local arch asset_arch
+  arch="$(dpkg --print-architecture)"
+  case "$arch" in
+    amd64) asset_arch="linux_amd64" ;;
+    arm64) asset_arch="linux_arm64" ;;
+    armhf) asset_arch="linux_armv7" ;;
+    *) die "Unsupported architecture for automatic GOST install: $arch" ;;
+  esac
+
+  ensure_tmp_dir
+  local asset_url archive extract_dir binary
+  archive="${TMP_DIR}/gost.tar.gz"
+  extract_dir="${TMP_DIR}/gost"
+  install -d -m 0755 "$extract_dir"
+
+  log "Resolving latest GOST release for ${asset_arch}"
+  asset_url="$(
+    python3 - "$asset_arch" <<'PY'
+import json
+import sys
+import urllib.request
+
+asset_arch = sys.argv[1]
+with urllib.request.urlopen("https://api.github.com/repos/go-gost/gost/releases/latest", timeout=30) as response:
+    release = json.load(response)
+
+for asset in release.get("assets", []):
+    name = asset.get("name", "")
+    url = asset.get("browser_download_url", "")
+    if asset_arch in name and name.endswith(".tar.gz"):
+        print(url)
+        break
+else:
+    raise SystemExit(f"No GOST release asset found for {asset_arch}")
+PY
+  )"
+
+  log "Downloading GOST from GitHub"
+  curl -fsSL "$asset_url" -o "$archive"
+  tar -xzf "$archive" -C "$extract_dir"
+  binary="$(find "$extract_dir" -type f -name gost -perm -111 | head -n 1)"
+  [[ -n "$binary" ]] || die "Downloaded GOST archive did not contain an executable gost binary"
+
+  install -m 0755 "$binary" /usr/local/bin/gost
+  install -d -m 0700 "$ENV_DIR"
+  printf 'installed_at=%s\nsource=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$asset_url" >"$GOST_MARKER"
+  chmod 0600 "$GOST_MARKER"
+  log "GOST installed to /usr/local/bin/gost"
 }
 
 detect_public_ip() {
@@ -451,6 +540,7 @@ write_env_file() {
   install -d -m 0700 "$ENV_DIR"
   umask 077
   cat >"$ENV_FILE" <<EOF
+BRIDGE_ENGINE=${BRIDGE_ENGINE}
 SPIDER_API_KEY=${SPIDER_API_KEY}
 SPIDER_PROXY_TYPE=${SPIDER_PROXY_TYPE}
 SPIDER_COUNTRY_CODE=${SPIDER_COUNTRY_CODE}
@@ -491,7 +581,7 @@ write_systemd_service() {
   cat >"$SYSTEMD_FILE" <<EOF
 [Unit]
 Description=Spider Bridge Telegram Bot
-After=network-online.target squid.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -535,7 +625,7 @@ Telegram bot:
   journalctl -u spider-bridge-bot -f
 
 Proxy service:
-  systemctl status squid --no-pager
+  systemctl status $([[ "$BRIDGE_ENGINE" == "gost" ]] && printf 'spider-bridge-proxy' || printf 'squid') --no-pager
   /usr/local/sbin/spider-bridge-apply
 
 Swap:
@@ -569,23 +659,16 @@ main() {
   LOCAL_PROXY_USER="${LOCAL_PROXY_USER:-}"
   LOCAL_PROXY_PASS="${LOCAL_PROXY_PASS:-}"
   LOCAL_PROXY_PORT="${LOCAL_PROXY_PORT:-}"
+  BRIDGE_ENGINE="${BRIDGE_ENGINE:-}"
   SPIDER_PROXY_TYPE="${SPIDER_PROXY_TYPE:-}"
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE:-}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM:-country_code}"
   SPIDER_EXTRA_PARAMS="${SPIDER_EXTRA_PARAMS:-}"
-  SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME:-http}"
+  SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME:-}"
   SPIDER_UPSTREAM_HOST="${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}"
   SPIDER_UPSTREAM_PORT="${SPIDER_UPSTREAM_PORT:-}"
   SWAP_SIZE_GB="${SWAP_SIZE_GB:-${SPIDER_BRIDGE_SWAP_SIZE_GB:-}}"
   VPS_PUBLIC_IP="${VPS_PUBLIC_IP:-}"
-
-  if [[ -z "$SPIDER_UPSTREAM_PORT" ]]; then
-    if [[ "${SPIDER_UPSTREAM_SCHEME,,}" == "https" ]]; then
-      SPIDER_UPSTREAM_PORT="8889"
-    else
-      SPIDER_UPSTREAM_PORT="8888"
-    fi
-  fi
 
   local generated_pass
   generated_pass="$(random_token)"
@@ -596,9 +679,23 @@ main() {
   prompt_if_empty LOCAL_PROXY_USER "Local proxy username" "proxyuser" 0 1
   prompt_if_empty LOCAL_PROXY_PASS "Local proxy password" "$generated_pass" 0 1
   prompt_if_empty LOCAL_PROXY_PORT "Local proxy port" "3128" 0 1
+  prompt_if_empty BRIDGE_ENGINE "Bridge engine (squid or gost)" "squid" 0 1
   prompt_if_empty SPIDER_PROXY_TYPE "Spider proxy pool" "residential" 0 1
   prompt_if_empty SPIDER_COUNTRY_CODE "Spider country code, or off" "US" 0 0
   prompt_if_empty SWAP_SIZE_GB "Swap size in GB (0 to skip)" "2" 0 0
+
+  BRIDGE_ENGINE="${BRIDGE_ENGINE,,}"
+  if [[ -z "$SPIDER_UPSTREAM_SCHEME" ]]; then
+    if [[ "$BRIDGE_ENGINE" == "gost" ]]; then
+      SPIDER_UPSTREAM_SCHEME="socks5"
+    else
+      SPIDER_UPSTREAM_SCHEME="http"
+    fi
+  fi
+
+  if [[ -z "$SPIDER_UPSTREAM_PORT" ]]; then
+    SPIDER_UPSTREAM_PORT="$(default_upstream_port "${SPIDER_UPSTREAM_SCHEME,,}")"
+  fi
 
   normalize_values
   validate_values
@@ -611,6 +708,7 @@ main() {
 
   ensure_swap_file
   install_packages
+  install_gost_binary
   detect_public_ip
   install_project_files
   write_env_file

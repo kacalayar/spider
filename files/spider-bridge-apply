@@ -4,6 +4,8 @@ set -Eeuo pipefail
 ENV_FILE="/etc/spider-bridge/config.env"
 SQUID_CONF="/etc/squid/squid.conf"
 SQUID_USERS="/etc/squid/spider_bridge_users"
+GOST_SERVICE="/etc/systemd/system/spider-bridge-proxy.service"
+GOST_BIN="/usr/local/bin/gost"
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -46,11 +48,33 @@ validate_country_param() {
   esac
 }
 
+validate_bridge_engine() {
+  local value="$1"
+  case "$value" in
+    squid|gost) ;;
+    *) die "BRIDGE_ENGINE must be squid or gost" ;;
+  esac
+}
+
 validate_upstream_scheme() {
   local value="$1"
   case "$value" in
-    http|https) ;;
-    *) die "SPIDER_UPSTREAM_SCHEME must be http or https" ;;
+    http|https|socks5) ;;
+    *) die "SPIDER_UPSTREAM_SCHEME must be http, https, or socks5" ;;
+  esac
+}
+
+validate_engine_upstream_pair() {
+  if [[ "$BRIDGE_ENGINE" == "squid" && "$SPIDER_UPSTREAM_SCHEME" == "socks5" ]]; then
+    die "Squid engine cannot use socks5 upstream. Use BRIDGE_ENGINE=gost for Spider SOCKS5."
+  fi
+}
+
+default_upstream_port() {
+  case "$1" in
+    https) printf '8889\n' ;;
+    socks5) printf '8887\n' ;;
+    *) printf '8888\n' ;;
   esac
 }
 
@@ -73,7 +97,7 @@ load_env() {
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     [[ -n "$key" && "$key" != \#* ]] || continue
     case "$key" in
-      SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_SCHEME|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT)
+      BRIDGE_ENGINE|SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_SCHEME|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT)
         printf -v "$key" '%s' "$value"
         ;;
     esac
@@ -119,6 +143,31 @@ build_upstream_password() {
   fi
 
   printf '%s' "$password"
+}
+
+urlencode_component() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+systemd_escape_percent() {
+  printf '%s' "$1" | sed 's/%/%%/g'
+}
+
+managed_squid_conf() {
+  [[ -f "$SQUID_CONF" ]] && grep -q "Managed by spider-bridge" "$SQUID_CONF"
+}
+
+stop_gost_service() {
+  if systemctl list-unit-files spider-bridge-proxy.service >/dev/null 2>&1 || [[ -f "$GOST_SERVICE" ]]; then
+    systemctl stop spider-bridge-proxy.service >/dev/null 2>&1 || true
+    systemctl disable spider-bridge-proxy.service >/dev/null 2>&1 || true
+  fi
+}
+
+stop_managed_squid() {
+  managed_squid_conf || return 0
+  systemctl stop squid >/dev/null 2>&1 || true
+  systemctl disable squid >/dev/null 2>&1 || true
 }
 
 write_squid_conf() {
@@ -177,6 +226,48 @@ never_direct allow all
 EOF
 }
 
+write_gost_service() {
+  local upstream_password="$1"
+  local upstream_scheme="${SPIDER_UPSTREAM_SCHEME:-socks5}"
+  local upstream_host="${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}"
+  local upstream_port="${SPIDER_UPSTREAM_PORT:-}"
+
+  if [[ -z "$upstream_port" ]]; then
+    upstream_port="$(default_upstream_port "$upstream_scheme")"
+  fi
+
+  local local_user local_pass spider_user spider_pass local_url upstream_url
+  local systemd_local_url systemd_upstream_url
+  local_user="$(urlencode_component "$LOCAL_PROXY_USER")"
+  local_pass="$(urlencode_component "$LOCAL_PROXY_PASS")"
+  spider_user="$(urlencode_component "$SPIDER_API_KEY")"
+  spider_pass="$(urlencode_component "$upstream_password")"
+  local_url="http://${local_user}:${local_pass}@0.0.0.0:${LOCAL_PROXY_PORT}"
+  upstream_url="${upstream_scheme}://${spider_user}:${spider_pass}@${upstream_host}:${upstream_port}"
+  systemd_local_url="$(systemd_escape_percent "$local_url")"
+  systemd_upstream_url="$(systemd_escape_percent "$upstream_url")"
+
+  cat >"$GOST_SERVICE" <<EOF
+[Unit]
+Description=Spider Bridge Proxy (GOST)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${GOST_BIN} -L ${systemd_local_url} -F ${systemd_upstream_url}
+Restart=always
+RestartSec=3
+User=root
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 ensure_no_via_off() {
   if grep -Eq '^[[:space:]]*via[[:space:]]+off([[:space:]]|$)' "$SQUID_CONF"; then
     die "Squid config still contains 'via off'. Reinstall the latest spider-bridge files and run apply again."
@@ -184,12 +275,11 @@ ensure_no_via_off() {
 }
 
 main() {
-  require_command htpasswd
-  require_command squid
   require_command systemctl
 
   load_env
 
+  : "${BRIDGE_ENGINE:=squid}"
   : "${SPIDER_API_KEY:?SPIDER_API_KEY is required}"
   : "${LOCAL_PROXY_USER:?LOCAL_PROXY_USER is required}"
   : "${LOCAL_PROXY_PASS:?LOCAL_PROXY_PASS is required}"
@@ -198,16 +288,27 @@ main() {
   : "${SPIDER_COUNTRY_CODE:=US}"
   : "${SPIDER_COUNTRY_PARAM:=country_code}"
   : "${SPIDER_EXTRA_PARAMS:=}"
-  : "${SPIDER_UPSTREAM_SCHEME:=http}"
+  if [[ -z "${SPIDER_UPSTREAM_SCHEME:-}" ]]; then
+    if [[ "$BRIDGE_ENGINE" == "gost" ]]; then
+      SPIDER_UPSTREAM_SCHEME="socks5"
+    else
+      SPIDER_UPSTREAM_SCHEME="http"
+    fi
+  fi
+
+  BRIDGE_ENGINE="${BRIDGE_ENGINE,,}"
+  SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME,,}"
 
   validate_token "SPIDER_API_KEY" "$SPIDER_API_KEY"
   validate_local_credential "LOCAL_PROXY_USER" "$LOCAL_PROXY_USER"
   validate_local_credential "LOCAL_PROXY_PASS" "$LOCAL_PROXY_PASS"
   validate_port "$LOCAL_PROXY_PORT"
+  validate_bridge_engine "$BRIDGE_ENGINE"
   validate_proxy_type "$SPIDER_PROXY_TYPE"
   validate_country "$SPIDER_COUNTRY_CODE"
   validate_country_param "$SPIDER_COUNTRY_PARAM"
   validate_upstream_scheme "$SPIDER_UPSTREAM_SCHEME"
+  validate_engine_upstream_pair
   if [[ -n "${SPIDER_UPSTREAM_PORT:-}" ]]; then
     validate_port "$SPIDER_UPSTREAM_PORT"
   fi
@@ -218,22 +319,35 @@ main() {
   upstream_password="$(build_upstream_password)"
   effective_upstream_port="${SPIDER_UPSTREAM_PORT:-}"
   if [[ -z "$effective_upstream_port" ]]; then
-    if [[ "$SPIDER_UPSTREAM_SCHEME" == "https" ]]; then
-      effective_upstream_port="8889"
-    else
-      effective_upstream_port="8888"
-    fi
+    effective_upstream_port="$(default_upstream_port "$SPIDER_UPSTREAM_SCHEME")"
   fi
 
-  write_htpasswd
-  write_squid_conf "$upstream_password"
-  ensure_no_via_off
+  if [[ "$BRIDGE_ENGINE" == "gost" ]]; then
+    require_command python3
+    [[ -x "$GOST_BIN" ]] || die "Missing GOST binary: $GOST_BIN. Re-run installer with --bridge-engine gost."
 
-  squid -k parse >/dev/null
-  systemctl enable squid >/dev/null
-  systemctl restart squid
+    stop_managed_squid
+    write_gost_service "$upstream_password"
+    systemctl daemon-reload
+    systemctl enable spider-bridge-proxy.service >/dev/null
+    systemctl restart spider-bridge-proxy.service
+  else
+    require_command htpasswd
+    require_command squid
 
-  printf 'Spider bridge applied: local port %s, pool %s, country %s, upstream %s:%s (%s)\n' \
+    stop_gost_service
+    write_htpasswd
+    write_squid_conf "$upstream_password"
+    ensure_no_via_off
+
+    squid -k parse >/dev/null
+    systemctl daemon-reload
+    systemctl enable squid >/dev/null
+    systemctl restart squid
+  fi
+
+  printf 'Spider bridge applied: engine %s, local port %s, pool %s, country %s, upstream %s:%s (%s)\n' \
+    "$BRIDGE_ENGINE" \
     "$LOCAL_PROXY_PORT" \
     "$SPIDER_PROXY_TYPE" \
     "${SPIDER_COUNTRY_CODE:-default}" \

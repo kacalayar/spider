@@ -7,8 +7,11 @@ BOT_DIR="/opt/spider-bridge"
 APPLY_FILE="/usr/local/sbin/spider-bridge-apply"
 UNINSTALL_FILE="/usr/local/sbin/spider-bridge-uninstall"
 SYSTEMD_FILE="/etc/systemd/system/spider-bridge-bot.service"
+PROXY_SYSTEMD_FILE="/etc/systemd/system/spider-bridge-proxy.service"
 SQUID_CONF="/etc/squid/squid.conf"
 SQUID_USERS="/etc/squid/spider_bridge_users"
+GOST_BIN="/usr/local/bin/gost"
+GOST_MARKER="${ENV_DIR}/gost-installed-by-spider-bridge"
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -46,13 +49,15 @@ Options:
 
 Default behavior:
   - Stop and disable spider-bridge-bot.
-  - Remove /etc/systemd/system/spider-bridge-bot.service.
+  - Stop and disable spider-bridge-bot and spider-bridge-proxy when present.
+  - Remove spider-bridge systemd service files.
   - Remove /opt/spider-bridge and spider-bridge helper commands.
   - Remove /etc/spider-bridge and /var/lib/spider-bridge unless kept.
   - Remove /etc/squid/spider_bridge_users.
   - Remove swap files marked with "spider-bridge-swap" in /etc/fstab unless kept.
   - If /etc/squid/squid.conf is managed by spider-bridge, save it, then restore
     the newest /etc/squid/squid.conf.pre-spider-bridge.* backup when available.
+  - Remove /usr/local/bin/gost only when it was installed by this installer.
   - Packages are not removed unless --purge-packages is used.
 EOF
 }
@@ -85,7 +90,7 @@ systemctl_exists() {
 service_known() {
   local unit="$1"
   systemctl_exists || return 1
-  systemctl list-unit-files "$unit" >/dev/null 2>&1 || [[ -f "$SYSTEMD_FILE" ]]
+  systemctl list-unit-files "$unit" >/dev/null 2>&1 || [[ -f "/etc/systemd/system/${unit}" ]]
 }
 
 stop_disable_service() {
@@ -208,6 +213,13 @@ purge_packages() {
   run apt-get autoremove -y
 }
 
+remove_installed_gost() {
+  [[ -f "$GOST_MARKER" ]] || return 0
+  log "Removing GOST binary installed by spider-bridge"
+  remove_path "$GOST_BIN"
+  remove_path "$GOST_MARKER"
+}
+
 confirm() {
   [[ "$ASSUME_YES" == "1" || "$DRY_RUN" == "1" ]] && return 0
 
@@ -283,13 +295,16 @@ main() {
   confirm
 
   stop_disable_service spider-bridge-bot.service
+  stop_disable_service spider-bridge-proxy.service
 
   log "Removing systemd unit and bridge files"
   remove_path "$SYSTEMD_FILE"
+  remove_path "$PROXY_SYSTEMD_FILE"
   remove_path "$BOT_DIR"
   remove_path "$APPLY_FILE"
   remove_path "$UNINSTALL_FILE"
   remove_path "$SQUID_USERS"
+  remove_installed_gost
 
   if [[ "$KEEP_CONFIG" == "0" ]]; then
     remove_path "$ENV_DIR"

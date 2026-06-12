@@ -3,9 +3,10 @@
 Installer ini menyiapkan VPS Ubuntu 24 sebagai bridge proxy lokal:
 
 - Client konek ke VPS dengan format `VPS_IP:PORT:USER:PASS`.
-- VPS memakai Squid sebagai authenticated HTTP/HTTPS proxy.
-- Squid meneruskan traffic ke upstream Spider Proxy.
-- Bot Telegram mengubah country/pool Spider dan merestart Squid.
+- VPS menyediakan authenticated HTTP/HTTPS proxy lokal.
+- Default engine memakai Squid dan upstream Spider HTTP proxy `8888`.
+- Alternatif engine memakai GOST dan upstream Spider SOCKS5 proxy `8887`.
+- Bot Telegram mengubah country/pool/engine Spider dan merestart proxy.
 
 Referensi Spider:
 
@@ -21,6 +22,17 @@ Jalankan di Ubuntu 24:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
 sudo bash /tmp/spider-bridge-install.sh
+```
+
+Jika ingin meniru mode VPS pembanding yang memakai Spider SOCKS5, pilih engine
+`gost`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
+sudo bash /tmp/spider-bridge-install.sh \
+  --bridge-engine gost \
+  --spider-upstream-scheme socks5 \
+  --spider-upstream-port 8887
 ```
 
 Installer akan mengambil file pendukung dari repo GitHub ini jika folder `files/`
@@ -48,6 +60,9 @@ sudo bash /tmp/spider-bridge-install.sh \
   --proxy-user "myuser" \
   --proxy-pass "mypassword" \
   --port 3128 \
+  --bridge-engine gost \
+  --spider-upstream-scheme socks5 \
+  --spider-upstream-port 8887 \
   --swap-size-gb 2 \
   --country ID \
   --pool residential
@@ -71,6 +86,9 @@ sudo bash install.sh \
   --proxy-user "myuser" \
   --proxy-pass "mypassword" \
   --port 3128 \
+  --bridge-engine gost \
+  --spider-upstream-scheme socks5 \
+  --spider-upstream-port 8887 \
   --swap-size-gb 2 \
   --country ID \
   --pool residential
@@ -101,6 +119,41 @@ sudo bash /tmp/spider-bridge-install.sh \
 ```
 
 Uninstall hanya diperlukan jika ingin membersihkan service/config lama sepenuhnya.
+
+## Bridge Engine
+
+`squid` adalah default dan memakai upstream Spider HTTP proxy:
+
+```text
+Squid -> http://proxy.spider.cloud:8888
+```
+
+`gost` memakai upstream Spider SOCKS5 proxy:
+
+```text
+GOST -> socks5://proxy.spider.cloud:8887
+```
+
+Mode `gost` lebih dekat dengan VPS pembanding yang memakai GOST/PM2. Local
+proxy tetap sama untuk client:
+
+```text
+VPS_IP:PORT:LOCAL_USER:LOCAL_PASS
+```
+
+Ubah lewat bot:
+
+```text
+/setengine gost
+/setupstream socks5
+```
+
+Kembali ke Squid:
+
+```text
+/setengine squid
+/setupstream http
+```
 
 ## Swap
 
@@ -240,8 +293,12 @@ Tunnel connection failed: 403 Forbidden
 ```
 
 dan upstream masih `http://proxy.spider.cloud:8888`, berarti target CONNECT
-tersebut ditolak oleh Spider/network blocker. Coba target website real atau
-ganti pool/country.
+tersebut ditolak pada jalur HTTP parent. Coba target website real. Jika target
+yang sama bisa lewat VPS pembanding GOST/SOCKS5, gunakan:
+
+```text
+/setengine gost
+```
 
 ```text
 /status
@@ -253,10 +310,10 @@ Jika muncul `502 Bad Gateway`, jalankan:
 /diag
 ```
 
-`/diag` akan membandingkan test lewat Squid dengan test langsung ke upstream
-Spider. Jika direct Spider berhasil tapi lewat Squid gagal, masalahnya ada di
-konfigurasi parent proxy Squid. Jika direct Spider juga gagal, cek API key,
-saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
+`/diag` akan membandingkan test lewat proxy lokal dengan test langsung ke
+upstream Spider. Jika direct Spider berhasil tapi jalur lokal gagal, masalahnya
+ada di engine bridge atau service lokal. Jika direct Spider juga gagal, cek API
+key, saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
 Jika error berisi `Blocked by network blocker`, target test IP-check sedang
 diblok oleh policy Spider; coba target website real atau ganti pool/country.
 Untuk test website real dari Telegram:
@@ -271,6 +328,14 @@ gunakan:
 
 ```text
 /setupstream http
+```
+
+Jika Squid HTTP parent tetap menolak CONNECT ke target HTTPS tertentu, coba
+mode GOST/SOCKS5:
+
+```text
+/setengine gost
+/setupstream socks5
 ```
 
 Jika HTTP check menampilkan exit IP `127.0.0.1`, upgrade dan apply ulang config.
@@ -316,6 +381,9 @@ pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
 /setcountry off
 /setproxy residential
 /setcountryparam country_code
+/setengine gost
+/setengine squid
+/setupstream socks5
 /setupstream https
 /showproxy
 /test
@@ -334,7 +402,9 @@ pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
 
 ```bash
 systemctl status squid --no-pager
+systemctl status spider-bridge-proxy --no-pager
 systemctl status spider-bridge-bot --no-pager
+journalctl -u spider-bridge-proxy -f
 journalctl -u spider-bridge-bot -f
 ```
 
@@ -364,10 +434,11 @@ Tanpa prompt:
 sudo spider-bridge-uninstall --yes
 ```
 
-Default uninstaller menghapus service bot, file bridge, config `/etc/spider-bridge`,
-cache `/var/lib/spider-bridge`, user file Squid, dan merestore backup Squid
-`/etc/squid/squid.conf.pre-spider-bridge.*` terbaru jika ada. Paket OS tidak
-dihapus kecuali memakai:
+Default uninstaller menghapus service bot, service GOST bridge jika ada, file
+bridge, config `/etc/spider-bridge`, cache `/var/lib/spider-bridge`, user file
+Squid, dan merestore backup Squid `/etc/squid/squid.conf.pre-spider-bridge.*`
+terbaru jika ada. Binary `/usr/local/bin/gost` hanya dihapus jika installer ini
+yang memasangnya. Paket OS tidak dihapus kecuali memakai:
 
 ```bash
 sudo spider-bridge-uninstall --yes --purge-packages
