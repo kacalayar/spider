@@ -81,7 +81,7 @@ default_upstream_port() {
 validate_proxy_type() {
   local value="$1"
   case "$value" in
-    residential|residential_static|residential_fast|residential_core|residential_plus|residential_premium|mobile|isp|datacenter) ;;
+    default|residential|residential_static|residential_fast|residential_core|residential_plus|residential_premium|mobile|isp|datacenter) ;;
     *) die "Unsupported SPIDER_PROXY_TYPE: $value" ;;
   esac
 }
@@ -128,18 +128,28 @@ write_htpasswd() {
 }
 
 build_upstream_password() {
-  local password="proxy=${SPIDER_PROXY_TYPE}"
+  local password=""
+
+  if [[ "${SPIDER_PROXY_TYPE}" != "default" ]]; then
+    password="proxy=${SPIDER_PROXY_TYPE}"
+  fi
 
   if [[ -n "${SPIDER_COUNTRY_CODE:-}" ]]; then
     local country_value="$SPIDER_COUNTRY_CODE"
     if [[ "${SPIDER_COUNTRY_PARAM:-country_code}" == "country" ]]; then
       country_value="${country_value,,}"
     fi
-    password="${password}&${SPIDER_COUNTRY_PARAM:-country_code}=${country_value}"
+    if [[ -n "$password" ]]; then
+      password="${password}&"
+    fi
+    password="${password}${SPIDER_COUNTRY_PARAM:-country_code}=${country_value}"
   fi
 
   if [[ -n "${SPIDER_EXTRA_PARAMS:-}" ]]; then
-    password="${password}&${SPIDER_EXTRA_PARAMS}"
+    if [[ -n "$password" ]]; then
+      password="${password}&"
+    fi
+    password="${password}${SPIDER_EXTRA_PARAMS}"
   fi
 
   printf '%s' "$password"
@@ -297,7 +307,11 @@ main() {
   fi
 
   BRIDGE_ENGINE="${BRIDGE_ENGINE,,}"
+  SPIDER_PROXY_TYPE="${SPIDER_PROXY_TYPE,,}"
   SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME,,}"
+  if [[ "$SPIDER_PROXY_TYPE" == "datacenter" ]]; then
+    SPIDER_PROXY_TYPE="isp"
+  fi
 
   validate_token "SPIDER_API_KEY" "$SPIDER_API_KEY"
   validate_local_credential "LOCAL_PROXY_USER" "$LOCAL_PROXY_USER"

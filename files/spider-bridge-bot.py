@@ -41,6 +41,7 @@ FRAUD_CHECK_URL_TEMPLATE = "https://proxycheck.io/v2/{ip}?risk=1&vpn=1&asn=1&nod
 TELEGRAM_SAFE_TEXT_LIMIT = 3500
 
 PROXY_TYPES = [
+    "default",
     "residential",
     "residential_static",
     "residential_fast",
@@ -80,7 +81,7 @@ Perintah:
 /setcountry US - ubah lokasi, contoh US atau ID
 /setcountry off - pakai default Spider
 /setcountryparam country_code - pilih parameter country_code atau country
-/setproxy residential - ubah pool Spider
+/setproxy residential - ubah pool Spider, pakai default untuk tanpa proxy=...
 /setengine gost - ubah engine bridge: squid atau gost
 /setupstream socks5 - ubah upstream Spider: http, https, atau socks5
 /showproxy - tampilkan format ip:port:user:pass
@@ -434,18 +435,21 @@ def spider_password(env):
     if proxy_type == "datacenter":
         proxy_type = "isp"
 
-    password = f"proxy={proxy_type}"
+    parts = []
+    if proxy_type and proxy_type != "default":
+        parts.append(f"proxy={proxy_type}")
+
     country = env.get("SPIDER_COUNTRY_CODE", "")
     country_param = env.get("SPIDER_COUNTRY_PARAM", "country_code")
     if country:
         country_value = country.lower() if country_param == "country" else country.upper()
-        password += f"&{country_param}={country_value}"
+        parts.append(f"{country_param}={country_value}")
 
     extra = env.get("SPIDER_EXTRA_PARAMS", "")
     if extra:
-        password += f"&{extra}"
+        parts.append(extra)
 
-    return password
+    return "&".join(parts)
 
 
 def spider_auth_header(env):
@@ -1657,7 +1661,7 @@ def handle_admin_command(token, update, env, command, args):
 
     if command == "/setproxy":
         if not args:
-            send_message(token, chat, "Contoh: <code>/setproxy residential</code>")
+            send_message(token, chat, "Contoh: <code>/setproxy residential</code> atau <code>/setproxy default</code>")
             return
         handle_set_proxy(token, chat, env, args[0])
         return

@@ -68,6 +68,10 @@ sudo bash /tmp/spider-bridge-install.sh \
   --pool residential
 ```
 
+Gunakan `--pool default` jika ingin meniru VPS pembanding: installer tidak
+akan mengirim parameter `proxy=...` ke Spider, tetapi negara tetap bisa diatur
+dengan `--country ID` atau command `/setcountry`.
+
 ### Dari Clone Repo
 
 Jika repo sudah di-clone:
@@ -402,6 +406,7 @@ pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
 /setcountry ID
 /setcountry off
 /setproxy residential
+/setproxy default
 /setcountryparam country_code
 /setengine gost
 /setengine squid
@@ -419,6 +424,20 @@ pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
 /addadmin USER_ID
 /deladmin USER_ID
 ```
+
+Untuk meniru pola VPS pembanding yang memakai GOST + SOCKS5 tanpa parameter
+pool eksplisit, gunakan:
+
+```text
+/setengine gost
+/setupstream socks5
+/setproxy default
+/setcountry SG
+```
+
+Mode `default` tidak mengirim `proxy=...` ke Spider, sehingga password upstream
+menjadi seperti `country_code=SG`. Jika ingin menentukan pool lagi, jalankan
+`/setproxy residential`, `/setproxy mobile`, atau pool lain dari `/pools`.
 
 ## Service
 

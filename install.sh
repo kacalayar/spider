@@ -50,7 +50,7 @@ Options:
   --bridge-engine VALUE        Bridge engine: squid or gost, default: squid
   --country VALUE              Spider country code, default: US, use off for default
   --country-param VALUE        Spider country parameter: country_code or country, default: country_code
-  --pool VALUE                 Spider proxy pool, default: residential
+  --pool VALUE                 Spider proxy pool, default: residential, use default to omit proxy=...
   --vps-public-ip VALUE        Public IP shown by /showproxy, default: auto-detect
   --extra-param VALUE          Optional single extra Spider password param, example: session=abc
   --repo-raw-url VALUE         Raw GitHub base URL for remote install files
@@ -210,7 +210,7 @@ validate_upstream_host() {
 validate_proxy_type() {
   local value="$1"
   case "$value" in
-    residential|residential_static|residential_fast|residential_core|residential_plus|residential_premium|mobile|isp) ;;
+    default|residential|residential_static|residential_fast|residential_core|residential_plus|residential_premium|mobile|isp) ;;
     datacenter) SPIDER_PROXY_TYPE="isp" ;;
     *) die "Unsupported proxy pool: $value" ;;
   esac
