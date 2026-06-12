@@ -50,7 +50,7 @@ Options:
   --vps-public-ip VALUE        Public IP shown by /showproxy, default: auto-detect
   --extra-param VALUE          Optional single extra Spider password param, example: session=abc
   --repo-raw-url VALUE         Raw GitHub base URL for remote install files
-  --spider-upstream-scheme VALUE  Spider upstream scheme: http or https, default: https
+  --spider-upstream-scheme VALUE  Spider upstream scheme: http or https, default: http
   --spider-upstream-host VALUE    Spider upstream host, default: proxy.spider.cloud
   --spider-upstream-port VALUE    Spider upstream port, default: 8888 for http, 8889 for https
   --swap-size-gb VALUE         Swap file size in GB, default: 2, use 0 to skip
@@ -573,7 +573,7 @@ main() {
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE:-}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM:-country_code}"
   SPIDER_EXTRA_PARAMS="${SPIDER_EXTRA_PARAMS:-}"
-  SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME:-https}"
+  SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME:-http}"
   SPIDER_UPSTREAM_HOST="${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}"
   SPIDER_UPSTREAM_PORT="${SPIDER_UPSTREAM_PORT:-}"
   SWAP_SIZE_GB="${SWAP_SIZE_GB:-${SPIDER_BRIDGE_SWAP_SIZE_GB:-}}"

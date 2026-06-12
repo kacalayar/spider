@@ -91,13 +91,13 @@ sudo bash /tmp/spider-bridge-install.sh
 Jika `/etc/spider-bridge/config.env` sudah ada, installer memakai nilai lama
 sebagai default prompt. Argumen CLI tetap menang jika Anda ingin override.
 
-Contoh upgrade sekaligus memastikan upstream Spider memakai HTTPS `8889`:
+Contoh upgrade sekaligus memastikan upstream Spider memakai mode Squid-compatible `8888`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
 sudo bash /tmp/spider-bridge-install.sh \
-  --spider-upstream-scheme https \
-  --spider-upstream-port 8889
+  --spider-upstream-scheme http \
+  --spider-upstream-port 8888
 ```
 
 Uninstall hanya diperlukan jika ingin membersihkan service/config lama sepenuhnya.
@@ -171,7 +171,7 @@ Atau dari Telegram:
 Default installer memakai upstream:
 
 ```text
-https://proxy.spider.cloud:8889
+http://proxy.spider.cloud:8888
 ```
 
 Spider menyediakan endpoint:
@@ -181,22 +181,25 @@ http://proxy.spider.cloud:8888
 https://proxy.spider.cloud:8889
 ```
 
-Endpoint `8889` dipakai sebagai default karena client proxy umumnya akan membuka
-website HTTPS lewat method `CONNECT`, dan dokumentasi Spider memisahkan endpoint
-HTTP dan HTTPS. Koneksi dari VPS ke parent proxy Spider juga memakai TLS.
+Endpoint `8888` dipakai sebagai default untuk Squid karena Squid bertindak
+sebagai HTTP forward proxy dan meneruskan request ke parent proxy Spider.
+Untuk website HTTPS, client tetap memakai method `CONNECT`; payload HTTPS tetap
+tunnel end-to-end ke website tujuan. Berdasarkan diagnosa VPS, endpoint HTTPS
+`8889` bisa bekerja untuk request langsung, tetapi tidak kompatibel stabil
+dengan `cache_peer` Squid pada konfigurasi ini.
 
-Jika ingin memaksa upstream HTTP `8888`, install dengan:
+Jika ingin mencoba upstream HTTPS `8889`, install dengan:
 
 ```bash
-sudo bash install.sh --spider-upstream-scheme http
+sudo bash install.sh --spider-upstream-scheme https
 ```
 
 Atau eksplisit:
 
 ```bash
 sudo bash install.sh \
-  --spider-upstream-scheme http \
-  --spider-upstream-port 8888
+  --spider-upstream-scheme https \
+  --spider-upstream-port 8889
 ```
 
 Installer akan menambahkan opsi `tls` pada `cache_peer` Squid untuk mode
@@ -236,10 +239,11 @@ Jika muncul:
 Tunnel connection failed: 403 Forbidden
 ```
 
-dan upstream masih `http://proxy.spider.cloud:8888`, ganti ke endpoint HTTPS:
+dan upstream masih `http://proxy.spider.cloud:8888`, berarti target CONNECT
+tersebut ditolak oleh Spider/network blocker. Coba target website real atau
+ganti pool/country.
 
 ```text
-/setupstream https
 /status
 ```
 
@@ -255,6 +259,12 @@ konfigurasi parent proxy Squid. Jika direct Spider juga gagal, cek API key,
 saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
 Jika error berisi `Blocked by network blocker`, target test IP-check sedang
 diblok oleh policy Spider; coba target website real atau ganti pool/country.
+Jika direct Spider OK tetapi Squid path gagal saat upstream `https://...:8889`,
+gunakan:
+
+```text
+/setupstream http
+```
 
 Jika bot berulang mengirim pesan `Menerapkan upstream...` tanpa command baru,
 upgrade ke versi terbaru. Versi lama membuat service bot bergantung langsung

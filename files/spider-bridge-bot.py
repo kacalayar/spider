@@ -77,7 +77,7 @@ Perintah:
 /setcountry off - pakai default Spider
 /setcountryparam country_code - pilih parameter country_code atau country
 /setproxy residential - ubah pool Spider
-/setupstream https - ubah upstream Spider ke http/https
+/setupstream http - ubah upstream Spider, http disarankan untuk Squid
 /showproxy - tampilkan format ip:port:user:pass
 /test - test proxy lokal via Spider
 /diag - diagnosa Squid ke Spider upstream
@@ -387,8 +387,8 @@ def default_upstream_port(scheme):
 
 
 def upstream_scheme(env):
-    scheme = env.get("SPIDER_UPSTREAM_SCHEME", "https").lower()
-    return scheme if valid_upstream_scheme(scheme) else "https"
+    scheme = env.get("SPIDER_UPSTREAM_SCHEME", "http").lower()
+    return scheme if valid_upstream_scheme(scheme) else "http"
 
 
 def upstream_port(env):
@@ -874,11 +874,15 @@ def diagnostic_sections(env):
     local_ok = local_check["https"]["ok"] or local_check["http"]["ok"]
     direct_ok = direct_check["connect"]["ok"] or direct_check["http"]["ok"]
     if direct_ok and not local_ok:
+        if upstream_scheme(env) == "https":
+            recommendation = "Jalankan <code>/setupstream http</code>, lalu <code>/status</code>."
+        else:
+            recommendation = "Cek <code>cache_peer</code>, cache.log, dan koneksi VPS ke parent Spider."
         summary.extend(
             [
                 "",
                 "Diagnosis: <code>Spider direct OK, Squid path FAIL.</code>",
-                "Fokus cek <code>cache_peer</code>, TLS parent Squid, dan cache.log.",
+                recommendation,
             ]
         )
     elif not direct_ok:
@@ -939,7 +943,7 @@ def set_my_commands(token):
         {"command": "setcountry", "description": "Set country code"},
         {"command": "setcountryparam", "description": "Set country or country_code param"},
         {"command": "setproxy", "description": "Set Spider pool"},
-        {"command": "setupstream", "description": "Set Spider upstream http/https"},
+        {"command": "setupstream", "description": "Set Spider upstream, http recommended"},
         {"command": "showproxy", "description": "Show ip:port:user:pass"},
         {"command": "test", "description": "Test local proxy"},
         {"command": "diag", "description": "Diagnose Squid and Spider upstream"},

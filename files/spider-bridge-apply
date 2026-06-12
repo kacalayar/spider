@@ -123,7 +123,7 @@ build_upstream_password() {
 
 write_squid_conf() {
   local upstream_password="$1"
-  local upstream_scheme="${SPIDER_UPSTREAM_SCHEME:-https}"
+  local upstream_scheme="${SPIDER_UPSTREAM_SCHEME:-http}"
   local upstream_host="${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}"
   local upstream_port="${SPIDER_UPSTREAM_PORT:-}"
   local upstream_tls_option=""
@@ -171,7 +171,7 @@ access_log /var/log/squid/access.log squid
 cache_log /var/log/squid/cache.log
 cache_store_log none
 
-cache_peer ${upstream_host} parent ${upstream_port} 0 no-query default login=${SPIDER_API_KEY}:${upstream_password} name=spidercloud${upstream_tls_option}
+cache_peer ${upstream_host} parent ${upstream_port} 0 no-query no-digest no-netdb-exchange default login=${SPIDER_API_KEY}:${upstream_password} name=spidercloud${upstream_tls_option}
 never_direct allow all
 EOF
 }
@@ -191,7 +191,7 @@ main() {
   : "${SPIDER_COUNTRY_CODE:=US}"
   : "${SPIDER_COUNTRY_PARAM:=country_code}"
   : "${SPIDER_EXTRA_PARAMS:=}"
-  : "${SPIDER_UPSTREAM_SCHEME:=https}"
+  : "${SPIDER_UPSTREAM_SCHEME:=http}"
 
   validate_token "SPIDER_API_KEY" "$SPIDER_API_KEY"
   validate_local_credential "LOCAL_PROXY_USER" "$LOCAL_PROXY_USER"
