@@ -35,6 +35,7 @@ HTTP_IP_CHECK_URLS = [
     ("ident.me", "http://ident.me"),
     ("checkip.amazonaws", "http://checkip.amazonaws.com"),
 ]
+TELEGRAM_SAFE_TEXT_LIMIT = 3500
 
 PROXY_TYPES = [
     "residential",
@@ -240,6 +241,26 @@ def telegram_api(token, method, payload=None, timeout=35):
     return parsed.get("result")
 
 
+def split_text_chunks(text, limit=TELEGRAM_SAFE_TEXT_LIMIT):
+    text = str(text)
+    chunks = []
+    while len(text) > limit:
+        cut = text.rfind("\n\n", 0, limit)
+        if cut < 1:
+            cut = text.rfind("\n", 0, limit)
+        if cut < 1:
+            cut = limit
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    chunks.append(text)
+    return chunks or [""]
+
+
+def html_to_plain(text):
+    plain = re.sub(r"</?(?:b|code)>", "", str(text))
+    return html.unescape(plain)
+
+
 def send_message(token, chat_id, text, reply_markup=None):
     payload = {
         "chat_id": chat_id,
@@ -250,10 +271,21 @@ def send_message(token, chat_id, text, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    chunks = [text[i : i + 3900] for i in range(0, len(text), 3900)] or [""]
-    for chunk in chunks:
+    chunks = split_text_chunks(text)
+    for index, chunk in enumerate(chunks):
         payload["text"] = chunk
-        telegram_api(token, "sendMessage", payload)
+        if reply_markup and index > 0:
+            payload.pop("reply_markup", None)
+        try:
+            telegram_api(token, "sendMessage", payload)
+        except Exception as exc:
+            log(f"HTML sendMessage failed, retrying as plain text: {exc}")
+            fallback = {
+                "chat_id": chat_id,
+                "text": html_to_plain(chunk)[-TELEGRAM_SAFE_TEXT_LIMIT:],
+                "disable_web_page_preview": True,
+            }
+            telegram_api(token, "sendMessage", fallback)
 
 
 def send_chat_action(token, chat_id, action="typing"):
@@ -819,11 +851,11 @@ def tail_file(path, env, max_lines=24, max_chars=1500):
     return sanitize_text(text or "(empty)", env)
 
 
-def diagnostic_text(env):
+def diagnostic_sections(env):
     local_check = proxy_live_check(env, include_direct=True)
     direct_check = direct_spider_checks(env)
 
-    lines = [
+    summary = [
         "<b>Spider Bridge Diagnostics</b>",
         "",
         f"Squid: <code>{escape(service_state('squid'))}</code>",
@@ -836,13 +868,13 @@ def diagnostic_text(env):
         "",
         "<b>Direct to Spider upstream</b>",
     ]
-    lines.extend(format_check_result("Direct Spider HTTPS CONNECT", direct_check["connect"]))
-    lines.extend(format_check_result("Direct Spider HTTP", direct_check["http"]))
+    summary.extend(format_check_result("Direct Spider HTTPS CONNECT", direct_check["connect"]))
+    summary.extend(format_check_result("Direct Spider HTTP", direct_check["http"]))
 
     local_ok = local_check["https"]["ok"] or local_check["http"]["ok"]
     direct_ok = direct_check["connect"]["ok"] or direct_check["http"]["ok"]
     if direct_ok and not local_ok:
-        lines.extend(
+        summary.extend(
             [
                 "",
                 "Diagnosis: <code>Spider direct OK, Squid path FAIL.</code>",
@@ -851,7 +883,7 @@ def diagnostic_text(env):
         )
     elif not direct_ok:
         blocked = "Blocked by network blocker" in direct_check["connect"]["error"] or "Blocked by network blocker" in direct_check["http"]["error"]
-        lines.extend(
+        summary.extend(
             [
                 "",
                 "Diagnosis: <code>Direct Spider FAIL.</code>",
@@ -864,19 +896,19 @@ def diagnostic_text(env):
             ]
         )
     else:
-        lines.extend(["", "Diagnosis: <code>Proxy path OK.</code>"])
+        summary.extend(["", "Diagnosis: <code>Proxy path OK.</code>"])
 
-    lines.extend(
-        [
-            "",
-            "<b>Squid cache.log tail</b>",
-            f"<code>{escape(tail_file(SQUID_CACHE_LOG, env))}</code>",
-            "",
-            "<b>Squid access.log tail</b>",
-            f"<code>{escape(tail_file(SQUID_ACCESS_LOG, env, max_lines=12, max_chars=900))}</code>",
-        ]
-    )
-    return "\n".join(lines)
+    cache_tail = escape(tail_file(SQUID_CACHE_LOG, env, max_lines=18, max_chars=1200))
+    access_tail = escape(tail_file(SQUID_ACCESS_LOG, env, max_lines=10, max_chars=800))
+    return [
+        "\n".join(summary),
+        f"<b>Squid cache.log tail</b>\n<code>{cache_tail}</code>",
+        f"<b>Squid access.log tail</b>\n<code>{access_tail}</code>",
+    ]
+
+
+def diagnostic_text(env):
+    return "\n\n".join(diagnostic_sections(env))
 
 
 def status_text(env):
@@ -1063,7 +1095,8 @@ def handle_test(token, chat, env):
 
 def handle_diag(token, chat, env):
     send_message(token, chat, "Menjalankan diagnosa Squid dan Spider upstream...")
-    send_message(token, chat, diagnostic_text(env))
+    for section in diagnostic_sections(env):
+        send_message(token, chat, section)
 
 
 def countries_text(countries, source, error):
