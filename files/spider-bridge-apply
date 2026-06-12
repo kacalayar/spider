@@ -171,7 +171,6 @@ access_log /var/log/squid/access.log squid
 cache_log /var/log/squid/cache.log
 cache_store_log none
 forwarded_for delete
-via off
 
 cache_peer ${upstream_host} parent ${upstream_port} 0 no-query no-digest no-netdb-exchange default login=${SPIDER_API_KEY}:${upstream_password} name=spidercloud${upstream_tls_option}
 never_direct allow all

@@ -274,8 +274,9 @@ gunakan:
 ```
 
 Jika HTTP check menampilkan exit IP `127.0.0.1`, upgrade dan apply ulang config.
-Versi terbaru menulis `forwarded_for delete` dan `via off` di Squid agar header
-client lokal tidak ikut diteruskan ke Spider/target.
+Versi terbaru menulis `forwarded_for delete` di Squid agar header client lokal
+tidak ikut diteruskan ke Spider/target. Header `Via` tetap aktif karena proxy
+HTTP memang wajib menggunakannya.
 
 Jika bot berulang mengirim pesan `Menerapkan upstream...` tanpa command baru,
 upgrade ke versi terbaru. Versi lama membuat service bot bergantung langsung
