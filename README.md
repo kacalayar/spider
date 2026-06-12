@@ -259,6 +259,13 @@ konfigurasi parent proxy Squid. Jika direct Spider juga gagal, cek API key,
 saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
 Jika error berisi `Blocked by network blocker`, target test IP-check sedang
 diblok oleh policy Spider; coba target website real atau ganti pool/country.
+Untuk test website real dari Telegram:
+
+```text
+/testurl https://example.com
+/testurl https://httpbin.org/ip
+```
+
 Jika direct Spider OK tetapi Squid path gagal saat upstream `https://...:8889`,
 gunakan:
 
@@ -289,6 +296,7 @@ pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
 /setupstream https
 /showproxy
 /test
+/testurl https://example.com
 /diag
 /apply
 /setlocaluser USER

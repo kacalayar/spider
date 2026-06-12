@@ -81,6 +81,7 @@ Perintah:
 /setupstream http - ubah upstream Spider, http disarankan untuk Squid
 /showproxy - tampilkan format ip:port:user:pass
 /test - test proxy lokal via Spider
+/testurl https://example.com - test URL real lewat proxy lokal
 /diag - diagnosa Squid ke Spider upstream
 /apply - tulis ulang config dan restart Squid
 /setlocalpass PASSWORD - ubah password proxy lokal
@@ -381,6 +382,14 @@ def valid_country_param(value):
 
 def valid_upstream_scheme(value):
     return value in {"http", "https"}
+
+
+def valid_test_url(value):
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def default_upstream_port(scheme):
@@ -788,6 +797,69 @@ def proxy_live_check(env, include_direct=True):
     return {"https": https, "http": http, "direct": direct}
 
 
+def fetch_url_via_local_proxy(env, url):
+    proxy_handler = urllib.request.ProxyHandler(
+        {
+            "http": local_proxy_url(env),
+            "https": local_proxy_url(env),
+        }
+    )
+    opener = urllib.request.build_opener(proxy_handler)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "spider-bridge-bot/1.0"},
+    )
+
+    try:
+        with opener.open(request, timeout=30) as response:
+            body = response.read(600).decode("utf-8", errors="replace")
+            return {
+                "ok": True,
+                "status": getattr(response, "status", response.getcode()),
+                "url": response.geturl(),
+                "content_type": response.headers.get("Content-Type", ""),
+                "body": body.strip(),
+                "error": "",
+            }
+    except urllib.error.HTTPError as exc:
+        body = exc.read(600).decode("utf-8", errors="replace") if exc.fp else ""
+        return {
+            "ok": False,
+            "status": exc.code,
+            "url": url,
+            "content_type": exc.headers.get("Content-Type", "") if exc.headers else "",
+            "body": body.strip(),
+            "error": f"HTTP Error {exc.code}: {exc.reason}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "",
+            "url": url,
+            "content_type": "",
+            "body": "",
+            "error": str(exc),
+        }
+
+
+def format_url_test(result):
+    status = result["status"] if result["status"] != "" else "n/a"
+    lines = [
+        "<b>URL Test</b>",
+        f"Result: <code>{'OK' if result['ok'] else 'FAIL'}</code>",
+        f"HTTP status: <code>{escape(status)}</code>",
+        f"URL: <code>{escape(result['url'])}</code>",
+    ]
+    if result["content_type"]:
+        lines.append(f"Content-Type: <code>{escape(result['content_type'])}</code>")
+    if result["error"]:
+        lines.append(f"Error: <code>{escape(result['error'])}</code>")
+    if result["body"]:
+        preview = re.sub(r"\s+", " ", result["body"]).strip()[:280]
+        lines.append(f"Preview: <code>{escape(preview)}</code>")
+    return "\n".join(lines)
+
+
 def format_single_check(label, result):
     if result["ok"] and result["ip"]:
         target = f" via {result.get('target')}" if result.get("target") else ""
@@ -965,6 +1037,7 @@ def set_my_commands(token):
         {"command": "setupstream", "description": "Set Spider upstream, http recommended"},
         {"command": "showproxy", "description": "Show ip:port:user:pass"},
         {"command": "test", "description": "Test local proxy"},
+        {"command": "testurl", "description": "Test a real URL through local proxy"},
         {"command": "diag", "description": "Diagnose Squid and Spider upstream"},
         {"command": "apply", "description": "Restart proxy with current config"},
         {"command": "whoami", "description": "Show your Telegram user ID"},
@@ -1116,6 +1189,17 @@ def handle_test(token, chat, env):
     send_message(token, chat, f"<b>Proxy Test</b>\n\n{format_live_check(check, env)}")
 
 
+def handle_test_url(token, chat, env, args):
+    if not args or not valid_test_url(args[0]):
+        send_message(token, chat, "Contoh: <code>/testurl https://example.com</code>")
+        return
+
+    url = args[0]
+    send_message(token, chat, f"Testing URL lewat proxy lokal:\n<code>{escape(url)}</code>")
+    result = fetch_url_via_local_proxy(env, url)
+    send_message(token, chat, format_url_test(result))
+
+
 def handle_diag(token, chat, env):
     send_message(token, chat, "Menjalankan diagnosa Squid dan Spider upstream...")
     for section in diagnostic_sections(env):
@@ -1204,6 +1288,10 @@ def handle_admin_command(token, update, env, command, args):
 
     if command == "/test":
         handle_test(token, chat, env)
+        return
+
+    if command == "/testurl":
+        handle_test_url(token, chat, env, args)
         return
 
     if command == "/diag":
