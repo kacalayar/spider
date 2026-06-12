@@ -42,21 +42,21 @@ Options:
   --keep-config          Keep /etc/spider-bridge
   --keep-state           Keep /var/lib/spider-bridge
   --keep-swap            Keep swap file created by the installer
-  --no-restore-squid     Do not restore pre-install Squid backup
-  --no-stop-squid        Do not stop/disable Squid even when config is managed
-  --purge-packages       Apt purge squid and apache2-utils after removing bridge
+  --no-restore-squid     Do not restore legacy pre-install Squid backup
+  --no-stop-squid        Do not stop/disable legacy Squid even when config is managed
+  --purge-packages       Apt purge legacy squid and apache2-utils packages
   -h, --help             Show this help
 
 Default behavior:
-  - Stop and disable spider-bridge-bot.
   - Stop and disable spider-bridge-bot and spider-bridge-proxy when present.
   - Remove spider-bridge systemd service files.
   - Remove /opt/spider-bridge and spider-bridge helper commands.
   - Remove /etc/spider-bridge and /var/lib/spider-bridge unless kept.
-  - Remove /etc/squid/spider_bridge_users.
+  - Remove legacy /etc/squid/spider_bridge_users if present.
   - Remove swap files marked with "spider-bridge-swap" in /etc/fstab unless kept.
-  - If /etc/squid/squid.conf is managed by spider-bridge, save it, then restore
-    the newest /etc/squid/squid.conf.pre-spider-bridge.* backup when available.
+  - If a legacy /etc/squid/squid.conf is managed by spider-bridge, save it,
+    then restore the newest /etc/squid/squid.conf.pre-spider-bridge.* backup
+    when available.
   - Remove /usr/local/bin/gost only when it was installed by this installer.
   - Packages are not removed unless --purge-packages is used.
 EOF
@@ -207,7 +207,7 @@ purge_packages() {
     return 0
   fi
 
-  log "Purging bridge packages: squid apache2-utils"
+  log "Purging legacy Squid packages: squid apache2-utils"
   export DEBIAN_FRONTEND=noninteractive
   run apt-get purge -y squid apache2-utils
   run apt-get autoremove -y
@@ -226,7 +226,7 @@ confirm() {
   cat <<EOF
 This will uninstall Spider Bridge from this VPS.
 
-It may stop Squid if the current Squid config is managed by spider-bridge.
+It may stop legacy Squid if the current Squid config is managed by spider-bridge.
 It will not remove apt packages unless --purge-packages is used.
 
 Continue? [y/N]:

@@ -3,7 +3,6 @@ set -Eeuo pipefail
 
 ENV_FILE="/etc/spider-bridge/config.env"
 SQUID_CONF="/etc/squid/squid.conf"
-SQUID_USERS="/etc/squid/spider_bridge_users"
 GOST_SERVICE="/etc/systemd/system/spider-bridge-proxy.service"
 GOST_BIN="/usr/local/bin/gost"
 
@@ -51,31 +50,25 @@ validate_country_param() {
 validate_bridge_engine() {
   local value="$1"
   case "$value" in
-    squid|gost) ;;
-    *) die "BRIDGE_ENGINE must be squid or gost" ;;
+    gost) ;;
+    *) die "BRIDGE_ENGINE must be gost. Squid support has been removed; use GOST + Spider SOCKS5." ;;
   esac
 }
 
 validate_upstream_scheme() {
   local value="$1"
   case "$value" in
-    http|https|socks5) ;;
-    *) die "SPIDER_UPSTREAM_SCHEME must be http, https, or socks5" ;;
+    socks5) ;;
+    *) die "SPIDER_UPSTREAM_SCHEME must be socks5. This bridge is GOST-only." ;;
   esac
 }
 
 validate_engine_upstream_pair() {
-  if [[ "$BRIDGE_ENGINE" == "squid" && "$SPIDER_UPSTREAM_SCHEME" == "socks5" ]]; then
-    die "Squid engine cannot use socks5 upstream. Use BRIDGE_ENGINE=gost for Spider SOCKS5."
-  fi
+  [[ "$BRIDGE_ENGINE" == "gost" && "$SPIDER_UPSTREAM_SCHEME" == "socks5" ]] || die "Spider Bridge now requires GOST with SOCKS5 upstream."
 }
 
 default_upstream_port() {
-  case "$1" in
-    https) printf '8889\n' ;;
-    socks5) printf '8887\n' ;;
-    *) printf '8888\n' ;;
-  esac
+  printf '8887\n'
 }
 
 validate_proxy_type() {
@@ -102,29 +95,6 @@ load_env() {
         ;;
     esac
   done <"$ENV_FILE"
-}
-
-backup_squid_conf_once() {
-  [[ -f "$SQUID_CONF" ]] || return 0
-  if grep -q "Managed by spider-bridge" "$SQUID_CONF"; then
-    return 0
-  fi
-
-  local backup="${SQUID_CONF}.pre-spider-bridge.$(date +%Y%m%d%H%M%S)"
-  cp "$SQUID_CONF" "$backup"
-  printf 'Backed up existing Squid config to %s\n' "$backup"
-}
-
-write_htpasswd() {
-  install -d -m 0755 "$(dirname "$SQUID_USERS")"
-  htpasswd -bcm "$SQUID_USERS" "$LOCAL_PROXY_USER" "$LOCAL_PROXY_PASS" >/dev/null
-
-  if getent group proxy >/dev/null 2>&1; then
-    chown root:proxy "$SQUID_USERS"
-    chmod 0640 "$SQUID_USERS"
-  else
-    chmod 0644 "$SQUID_USERS"
-  fi
 }
 
 build_upstream_password() {
@@ -167,73 +137,10 @@ managed_squid_conf() {
   [[ -f "$SQUID_CONF" ]] && grep -q "Managed by spider-bridge" "$SQUID_CONF"
 }
 
-stop_gost_service() {
-  if systemctl list-unit-files spider-bridge-proxy.service >/dev/null 2>&1 || [[ -f "$GOST_SERVICE" ]]; then
-    systemctl stop spider-bridge-proxy.service >/dev/null 2>&1 || true
-    systemctl disable spider-bridge-proxy.service >/dev/null 2>&1 || true
-  fi
-}
-
 stop_managed_squid() {
   managed_squid_conf || return 0
   systemctl stop squid >/dev/null 2>&1 || true
   systemctl disable squid >/dev/null 2>&1 || true
-}
-
-write_squid_conf() {
-  local upstream_password="$1"
-  local upstream_scheme="${SPIDER_UPSTREAM_SCHEME:-http}"
-  local upstream_host="${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}"
-  local upstream_port="${SPIDER_UPSTREAM_PORT:-}"
-  local upstream_tls_option=""
-
-  if [[ -z "$upstream_port" ]]; then
-    if [[ "$upstream_scheme" == "https" ]]; then
-      upstream_port="8889"
-    else
-      upstream_port="8888"
-    fi
-  fi
-
-  if [[ "$upstream_scheme" == "https" ]]; then
-    upstream_tls_option=" tls"
-  fi
-
-  backup_squid_conf_once
-
-  cat >"$SQUID_CONF" <<EOF
-# Managed by spider-bridge. Manual edits may be overwritten.
-visible_hostname spider-bridge
-
-http_port 0.0.0.0:${LOCAL_PROXY_PORT}
-
-auth_param basic program /usr/lib/squid/basic_ncsa_auth ${SQUID_USERS}
-auth_param basic realm Spider Bridge Proxy
-acl authenticated proxy_auth REQUIRED
-
-acl SSL_ports port 443 563 8443
-acl Safe_ports port 80
-acl Safe_ports port 443
-acl Safe_ports port 563
-acl Safe_ports port 1025-65535
-acl CONNECT method CONNECT
-
-http_access deny !Safe_ports
-http_access deny CONNECT !SSL_ports
-http_access allow authenticated
-http_access deny all
-
-cache deny all
-cache_mem 64 MB
-maximum_object_size 0 KB
-access_log /var/log/squid/access.log squid
-cache_log /var/log/squid/cache.log
-cache_store_log none
-forwarded_for delete
-
-cache_peer ${upstream_host} parent ${upstream_port} 0 no-query no-digest no-netdb-exchange default login=${SPIDER_API_KEY}:${upstream_password} name=spidercloud${upstream_tls_option}
-never_direct allow all
-EOF
 }
 
 write_gost_service() {
@@ -278,18 +185,12 @@ WantedBy=multi-user.target
 EOF
 }
 
-ensure_no_via_off() {
-  if grep -Eq '^[[:space:]]*via[[:space:]]+off([[:space:]]|$)' "$SQUID_CONF"; then
-    die "Squid config still contains 'via off'. Reinstall the latest spider-bridge files and run apply again."
-  fi
-}
-
 main() {
   require_command systemctl
 
   load_env
 
-  : "${BRIDGE_ENGINE:=squid}"
+  : "${BRIDGE_ENGINE:=gost}"
   : "${SPIDER_API_KEY:?SPIDER_API_KEY is required}"
   : "${LOCAL_PROXY_USER:?LOCAL_PROXY_USER is required}"
   : "${LOCAL_PROXY_PASS:?LOCAL_PROXY_PASS is required}"
@@ -298,17 +199,20 @@ main() {
   : "${SPIDER_COUNTRY_CODE:=US}"
   : "${SPIDER_COUNTRY_PARAM:=country_code}"
   : "${SPIDER_EXTRA_PARAMS:=}"
-  if [[ -z "${SPIDER_UPSTREAM_SCHEME:-}" ]]; then
-    if [[ "$BRIDGE_ENGINE" == "gost" ]]; then
-      SPIDER_UPSTREAM_SCHEME="socks5"
-    else
-      SPIDER_UPSTREAM_SCHEME="http"
-    fi
-  fi
+  : "${SPIDER_UPSTREAM_SCHEME:=socks5}"
 
   BRIDGE_ENGINE="${BRIDGE_ENGINE,,}"
+  if [[ "$BRIDGE_ENGINE" != "gost" ]]; then
+    BRIDGE_ENGINE="gost"
+  fi
   SPIDER_PROXY_TYPE="${SPIDER_PROXY_TYPE,,}"
   SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME,,}"
+  if [[ "$SPIDER_UPSTREAM_SCHEME" != "socks5" ]]; then
+    SPIDER_UPSTREAM_SCHEME="socks5"
+  fi
+  if [[ -z "${SPIDER_UPSTREAM_PORT:-}" || "$SPIDER_UPSTREAM_PORT" == "8888" || "$SPIDER_UPSTREAM_PORT" == "8889" ]]; then
+    SPIDER_UPSTREAM_PORT="8887"
+  fi
   if [[ "$SPIDER_PROXY_TYPE" == "datacenter" ]]; then
     SPIDER_PROXY_TYPE="isp"
   fi
@@ -336,29 +240,14 @@ main() {
     effective_upstream_port="$(default_upstream_port "$SPIDER_UPSTREAM_SCHEME")"
   fi
 
-  if [[ "$BRIDGE_ENGINE" == "gost" ]]; then
-    require_command python3
-    [[ -x "$GOST_BIN" ]] || die "Missing GOST binary: $GOST_BIN. Re-run installer with --bridge-engine gost."
+  require_command python3
+  [[ -x "$GOST_BIN" ]] || die "Missing GOST binary: $GOST_BIN. Re-run installer."
 
-    stop_managed_squid
-    write_gost_service "$upstream_password"
-    systemctl daemon-reload
-    systemctl enable spider-bridge-proxy.service >/dev/null
-    systemctl restart spider-bridge-proxy.service
-  else
-    require_command htpasswd
-    require_command squid
-
-    stop_gost_service
-    write_htpasswd
-    write_squid_conf "$upstream_password"
-    ensure_no_via_off
-
-    squid -k parse >/dev/null
-    systemctl daemon-reload
-    systemctl enable squid >/dev/null
-    systemctl restart squid
-  fi
+  stop_managed_squid
+  write_gost_service "$upstream_password"
+  systemctl daemon-reload
+  systemctl enable spider-bridge-proxy.service >/dev/null
+  systemctl restart spider-bridge-proxy.service
 
   printf 'Spider bridge applied: engine %s, local port %s, pool %s, country %s, upstream %s:%s (%s)\n' \
     "$BRIDGE_ENGINE" \

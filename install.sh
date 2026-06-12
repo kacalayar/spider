@@ -15,6 +15,7 @@ TMP_DIR=""
 
 NON_INTERACTIVE=0
 OPEN_UFW=1
+BRIDGE_ENGINE_SET=0
 UPSTREAM_SCHEME_SET=0
 UPSTREAM_PORT_SET=0
 
@@ -47,16 +48,16 @@ Options:
   --proxy-user VALUE           Local proxy username, default: proxyuser
   --proxy-pass VALUE           Local proxy password, default: generated
   --port VALUE                 Local proxy port, default: 3128
-  --bridge-engine VALUE        Bridge engine: squid or gost, default: squid
+  --bridge-engine VALUE        Bridge engine, only gost is supported
   --country VALUE              Spider country code, default: US, use off for default
   --country-param VALUE        Spider country parameter: country_code or country, default: country_code
   --pool VALUE                 Spider proxy pool, default: residential, use default to omit proxy=...
   --vps-public-ip VALUE        Public IP shown by /showproxy, default: auto-detect
   --extra-param VALUE          Optional single extra Spider password param, example: session=abc
   --repo-raw-url VALUE         Raw GitHub base URL for remote install files
-  --spider-upstream-scheme VALUE  Spider upstream scheme: http, https, or socks5
+  --spider-upstream-scheme VALUE  Spider upstream scheme, only socks5 is supported
   --spider-upstream-host VALUE    Spider upstream host, default: proxy.spider.cloud
-  --spider-upstream-port VALUE    Spider upstream port, default: 8888 http, 8889 https, 8887 socks5
+  --spider-upstream-port VALUE    Spider upstream port, default: 8887
   --swap-size-gb VALUE         Swap file size in GB, default: 2, use 0 to skip
   --swap-file VALUE            Swap file path, default: /swapfile
   --no-swap                    Do not create or enable a swap file
@@ -174,37 +175,38 @@ validate_country_param() {
 validate_bridge_engine() {
   local value="$1"
   case "$value" in
-    squid|gost) ;;
-    *) die "BRIDGE_ENGINE must be squid or gost" ;;
+    gost) ;;
+    *) die "BRIDGE_ENGINE must be gost. Squid support has been removed; use GOST + Spider SOCKS5." ;;
   esac
 }
 
 validate_upstream_scheme() {
   local value="$1"
   case "$value" in
-    http|https|socks5) ;;
-    *) die "SPIDER_UPSTREAM_SCHEME must be http, https, or socks5" ;;
+    socks5) ;;
+    *) die "SPIDER_UPSTREAM_SCHEME must be socks5. This installer is GOST-only." ;;
   esac
 }
 
 validate_engine_upstream_pair() {
-  if [[ "$BRIDGE_ENGINE" == "squid" && "$SPIDER_UPSTREAM_SCHEME" == "socks5" ]]; then
-    die "Squid engine cannot use socks5 upstream. Use --bridge-engine gost for Spider SOCKS5."
-  fi
+  [[ "$BRIDGE_ENGINE" == "gost" && "$SPIDER_UPSTREAM_SCHEME" == "socks5" ]] || die "Spider Bridge now requires GOST with SOCKS5 upstream."
 }
 
 default_upstream_port() {
-  case "$1" in
-    https) printf '8889\n' ;;
-    socks5) printf '8887\n' ;;
-    *) printf '8888\n' ;;
-  esac
+  printf '8887\n'
 }
 
 validate_upstream_host() {
   local value="$1"
   [[ -n "$value" ]] || die "SPIDER_UPSTREAM_HOST cannot be empty"
   [[ "$value" != *[[:space:]]* ]] || die "SPIDER_UPSTREAM_HOST cannot contain whitespace"
+}
+
+validate_spider_socks_port() {
+  local value="$1"
+  case "$value" in
+    8888|8889) die "Spider Bridge now uses GOST SOCKS5 upstream on port 8887, not $value." ;;
+  esac
 }
 
 validate_proxy_type() {
@@ -273,6 +275,7 @@ parse_args() {
         ;;
       --bridge-engine)
         BRIDGE_ENGINE="$2"
+        BRIDGE_ENGINE_SET=1
         shift 2
         ;;
       --country)
@@ -370,6 +373,7 @@ validate_values() {
   validate_engine_upstream_pair
   validate_upstream_host "$SPIDER_UPSTREAM_HOST"
   validate_port "$SPIDER_UPSTREAM_PORT"
+  validate_spider_socks_port "$SPIDER_UPSTREAM_PORT"
   validate_admin_ids "$TELEGRAM_ADMIN_IDS"
   validate_extra_param "$SPIDER_EXTRA_PARAMS"
   validate_swap_size "$SWAP_SIZE_GB"
@@ -440,12 +444,10 @@ install_packages() {
   log "Installing Ubuntu packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y squid apache2-utils curl python3 openssl ca-certificates tar
+  apt-get install -y curl python3 openssl ca-certificates tar
 }
 
 install_gost_binary() {
-  [[ "$BRIDGE_ENGINE" == "gost" ]] || return 0
-
   if command -v gost >/dev/null 2>&1; then
     log "GOST already installed: $(command -v gost)"
     return 0
@@ -629,7 +631,7 @@ Telegram bot:
   journalctl -u spider-bridge-bot -f
 
 Proxy service:
-  systemctl status $([[ "$BRIDGE_ENGINE" == "gost" ]] && printf 'spider-bridge-proxy' || printf 'squid') --no-pager
+  systemctl status spider-bridge-proxy --no-pager
   /usr/local/sbin/spider-bridge-apply
 
 Swap:
@@ -663,7 +665,7 @@ main() {
   LOCAL_PROXY_USER="${LOCAL_PROXY_USER:-}"
   LOCAL_PROXY_PASS="${LOCAL_PROXY_PASS:-}"
   LOCAL_PROXY_PORT="${LOCAL_PROXY_PORT:-}"
-  BRIDGE_ENGINE="${BRIDGE_ENGINE:-}"
+  BRIDGE_ENGINE="${BRIDGE_ENGINE:-gost}"
   SPIDER_PROXY_TYPE="${SPIDER_PROXY_TYPE:-}"
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE:-}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM:-country_code}"
@@ -683,19 +685,24 @@ main() {
   prompt_if_empty LOCAL_PROXY_USER "Local proxy username" "proxyuser" 0 1
   prompt_if_empty LOCAL_PROXY_PASS "Local proxy password" "$generated_pass" 0 1
   prompt_if_empty LOCAL_PROXY_PORT "Local proxy port" "3128" 0 1
-  prompt_if_empty BRIDGE_ENGINE "Bridge engine (squid or gost)" "squid" 0 1
   prompt_if_empty SPIDER_PROXY_TYPE "Spider proxy pool" "residential" 0 1
   prompt_if_empty SPIDER_COUNTRY_CODE "Spider country code, or off" "US" 0 0
   prompt_if_empty SWAP_SIZE_GB "Swap size in GB (0 to skip)" "2" 0 0
 
   BRIDGE_ENGINE="${BRIDGE_ENGINE,,}"
-  if [[ "$BRIDGE_ENGINE" == "gost" && "$UPSTREAM_SCHEME_SET" == "0" ]]; then
+  if [[ "$BRIDGE_ENGINE_SET" == "0" && "$BRIDGE_ENGINE" != "gost" ]]; then
+    log "Ignoring legacy BRIDGE_ENGINE=${BRIDGE_ENGINE}; using gost"
+    BRIDGE_ENGINE="gost"
+  fi
+
+  if [[ "$UPSTREAM_SCHEME_SET" == "0" ]]; then
     SPIDER_UPSTREAM_SCHEME="socks5"
-    if [[ "$UPSTREAM_PORT_SET" == "0" ]]; then
-      SPIDER_UPSTREAM_PORT="8887"
-    fi
-  elif [[ -z "$SPIDER_UPSTREAM_SCHEME" ]]; then
-    SPIDER_UPSTREAM_SCHEME="http"
+  elif [[ "${SPIDER_UPSTREAM_SCHEME,,}" != "socks5" ]]; then
+    die "Only --spider-upstream-scheme socks5 is supported now."
+  fi
+
+  if [[ "$UPSTREAM_PORT_SET" == "0" ]]; then
+    SPIDER_UPSTREAM_PORT="8887"
   fi
 
   if [[ -z "$SPIDER_UPSTREAM_PORT" ]]; then
