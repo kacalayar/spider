@@ -15,6 +15,8 @@ TMP_DIR=""
 
 NON_INTERACTIVE=0
 OPEN_UFW=1
+UPSTREAM_SCHEME_SET=0
+UPSTREAM_PORT_SET=0
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -299,6 +301,7 @@ parse_args() {
         ;;
       --spider-upstream-scheme)
         SPIDER_UPSTREAM_SCHEME="$2"
+        UPSTREAM_SCHEME_SET=1
         shift 2
         ;;
       --spider-upstream-host)
@@ -307,6 +310,7 @@ parse_args() {
         ;;
       --spider-upstream-port)
         SPIDER_UPSTREAM_PORT="$2"
+        UPSTREAM_PORT_SET=1
         shift 2
         ;;
       --swap-size-gb)
@@ -685,12 +689,13 @@ main() {
   prompt_if_empty SWAP_SIZE_GB "Swap size in GB (0 to skip)" "2" 0 0
 
   BRIDGE_ENGINE="${BRIDGE_ENGINE,,}"
-  if [[ -z "$SPIDER_UPSTREAM_SCHEME" ]]; then
-    if [[ "$BRIDGE_ENGINE" == "gost" ]]; then
-      SPIDER_UPSTREAM_SCHEME="socks5"
-    else
-      SPIDER_UPSTREAM_SCHEME="http"
+  if [[ "$BRIDGE_ENGINE" == "gost" && "$UPSTREAM_SCHEME_SET" == "0" ]]; then
+    SPIDER_UPSTREAM_SCHEME="socks5"
+    if [[ "$UPSTREAM_PORT_SET" == "0" ]]; then
+      SPIDER_UPSTREAM_PORT="8887"
     fi
+  elif [[ -z "$SPIDER_UPSTREAM_SCHEME" ]]; then
+    SPIDER_UPSTREAM_SCHEME="http"
   fi
 
   if [[ -z "$SPIDER_UPSTREAM_PORT" ]]; then

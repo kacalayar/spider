@@ -141,6 +141,18 @@ proxy tetap sama untuk client:
 VPS_IP:PORT:LOCAL_USER:LOCAL_PASS
 ```
 
+Saat mode `gost`, `/status` harus menampilkan:
+
+```text
+Spider upstream: socks5://proxy.spider.cloud:8887
+```
+
+Jika masih tampil `http://proxy.spider.cloud:8888`, jalankan:
+
+```text
+/setupstream socks5
+```
+
 Ubah lewat bot:
 
 ```text

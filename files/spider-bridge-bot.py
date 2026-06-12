@@ -1082,6 +1082,8 @@ def format_live_check(check, env):
             lines.append("Hint: <code>Spider menolak CONNECT lewat HTTP parent. Coba /setengine gost atau /setupstream socks5.</code>")
         else:
             lines.append("Hint: <code>Spider menolak CONNECT ke target IP-check. Coba target website real atau ganti pool/country.</code>")
+    if bridge_engine(env) == "gost" and upstream_scheme(env) != "socks5":
+        lines.append("Hint: <code>Engine GOST masih memakai upstream non-SOCKS5. Jalankan /setupstream socks5.</code>")
     if ("502" in https["error"] or "502" in http["error"]) and not (https["ok"] or http["ok"]):
         lines.append(f"Hint: <code>502 berasal dari jalur {escape(proxy_service_label(env))} ke Spider. Jalankan /diag.</code>")
     if "Blocked by network blocker" in https["error"] or "Blocked by network blocker" in http["error"]:
@@ -1169,7 +1171,9 @@ def diagnostic_sections(env):
     local_ok = local_check["https"]["ok"] or local_check["http"]["ok"]
     direct_ok = direct_check["connect"]["ok"] or direct_check["http"]["ok"]
     if direct_ok and not local_ok:
-        if upstream_scheme(env) == "https":
+        if engine == "gost" and upstream_scheme(env) != "socks5":
+            recommendation = "Jalankan <code>/setupstream socks5</code> agar GOST memakai Spider SOCKS5 <code>8887</code>."
+        elif upstream_scheme(env) == "https":
             recommendation = "Jalankan <code>/setupstream http</code>, lalu <code>/status</code>."
         elif upstream_scheme(env) == "http" and engine == "squid":
             recommendation = "Coba <code>/setengine gost</code> atau <code>/setupstream socks5</code> untuk memakai Spider SOCKS5."
