@@ -218,6 +218,13 @@ def send_message(token, chat_id, text, reply_markup=None):
         telegram_api(token, "sendMessage", payload)
 
 
+def send_chat_action(token, chat_id, action="typing"):
+    try:
+        telegram_api(token, "sendChatAction", {"chat_id": chat_id, "action": action}, timeout=10)
+    except Exception as exc:
+        log(f"Unable to send chat action: {exc}")
+
+
 def edit_message(token, chat_id, message_id, text, reply_markup=None):
     payload = {
         "chat_id": chat_id,
@@ -380,14 +387,35 @@ def service_state(name):
 
 
 def run_apply():
-    result = subprocess.run(
-        [APPLY_CMD],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [APPLY_CMD],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        output = (stdout + "\n" + stderr).strip()
+        message = "Apply timeout setelah 90 detik."
+        if output:
+            message += f"\n{output[-1400:]}"
+        message += "\nCek di VPS: journalctl -u squid -n 80 --no-pager"
+        return False, message[-1800:]
+    except FileNotFoundError:
+        return False, f"Apply command tidak ditemukan: {APPLY_CMD}"
+    except Exception as exc:
+        return False, f"Apply gagal sebelum selesai: {exc}"
+
     output = (result.stdout + "\n" + result.stderr).strip()
+    if not output:
+        output = f"{APPLY_CMD} exit code {result.returncode}"
     return result.returncode == 0, output[-1800:]
 
 
@@ -646,6 +674,11 @@ def handle_set_upstream(token, chat, env, args):
 
     env["SPIDER_UPSTREAM_SCHEME"] = scheme
     env["SPIDER_UPSTREAM_PORT"] = port
+    send_message(
+        token,
+        chat,
+        f"Menerapkan upstream Spider ke <code>{escape(upstream_endpoint(env))}</code>...",
+    )
     save_env(env)
 
     ok, output = run_apply()
@@ -838,7 +871,15 @@ def handle_message(token, update):
     if not require_admin_or_reply(token, update, env):
         return
 
-    handle_admin_command(token, update, env, command, args)
+    try:
+        send_chat_action(token, chat)
+        handle_admin_command(token, update, env, command, args)
+    except Exception as exc:
+        log(f"Command {command} failed: {exc}")
+        try:
+            send_message(token, chat, f"Perintah <code>{escape(command)}</code> gagal:\n<code>{escape(exc)}</code>")
+        except Exception as send_exc:
+            log(f"Unable to report command failure: {send_exc}")
 
 
 def handle_callback(token, update):
