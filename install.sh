@@ -118,6 +118,23 @@ prompt_if_empty() {
   printf -v "$var_name" '%s' "$value"
 }
 
+load_existing_config_defaults() {
+  [[ -r "$ENV_FILE" ]] || return 0
+
+  log "Loading existing config defaults from ${ENV_FILE}"
+  local key value
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    [[ -n "$key" && "$key" != \#* ]] || continue
+    case "$key" in
+      SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_SCHEME|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT|VPS_PUBLIC_IP|TELEGRAM_BOT_TOKEN|TELEGRAM_ADMIN_IDS)
+        if [[ -z "${!key:-}" ]]; then
+          printf -v "$key" '%s' "$value"
+        fi
+        ;;
+    esac
+  done <"$ENV_FILE"
+}
+
 validate_no_space() {
   local name="$1"
   local value="$2"
@@ -545,6 +562,7 @@ main() {
   fi
 
   parse_args "$@"
+  load_existing_config_defaults
 
   SPIDER_API_KEY="${SPIDER_API_KEY:-}"
   TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"

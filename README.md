@@ -79,6 +79,29 @@ sudo bash install.sh \
 Jika tidak mengisi `--telegram-admin-ids`, installer mencetak token `/claim`.
 Kirim `/claim TOKEN` ke bot Telegram untuk menjadi admin pertama.
 
+## Upgrade Existing Install
+
+Tidak perlu uninstall dulu untuk upgrade. Jalankan installer versi terbaru lagi:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
+sudo bash /tmp/spider-bridge-install.sh
+```
+
+Jika `/etc/spider-bridge/config.env` sudah ada, installer memakai nilai lama
+sebagai default prompt. Argumen CLI tetap menang jika Anda ingin override.
+
+Contoh upgrade sekaligus pindah upstream Spider ke HTTPS `8889`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
+sudo bash /tmp/spider-bridge-install.sh \
+  --spider-upstream-scheme https \
+  --spider-upstream-port 8889
+```
+
+Uninstall hanya diperlukan jika ingin membersihkan service/config lama sepenuhnya.
+
 ## Swap
 
 Installer menawarkan pembuatan swap file secara interaktif. Default-nya `2 GB`,
