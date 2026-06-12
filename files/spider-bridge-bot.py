@@ -37,6 +37,7 @@ HTTP_IP_CHECK_URLS = [
     ("ident.me", "http://ident.me"),
     ("checkip.amazonaws", "http://checkip.amazonaws.com"),
 ]
+FRAUD_CHECK_URL_TEMPLATE = "https://proxycheck.io/v2/{ip}?risk=1&vpn=1&asn=1&node=1&time=1"
 TELEGRAM_SAFE_TEXT_LIMIT = 3500
 
 PROXY_TYPES = [
@@ -262,7 +263,7 @@ def split_text_chunks(text, limit=TELEGRAM_SAFE_TEXT_LIMIT):
 
 
 def html_to_plain(text):
-    plain = re.sub(r"</?(?:b|code)>", "", str(text))
+    plain = re.sub(r"</?(?:b|code|blockquote)>", "", str(text))
     return html.unescape(plain)
 
 
@@ -553,6 +554,19 @@ def proxy_line(env):
     return f"{host}:{env.get('LOCAL_PROXY_PORT', '3128')}:{env.get('LOCAL_PROXY_USER', 'proxyuser')}:{env.get('LOCAL_PROXY_PASS', '<password>')}"
 
 
+def proxy_copy_keyboard(env):
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Copy proxy",
+                    "copy_text": {"text": proxy_line(env)},
+                }
+            ]
+        ]
+    }
+
+
 def local_proxy_url(env):
     user = urllib.parse.quote(env.get("LOCAL_PROXY_USER", ""), safe="")
     password = urllib.parse.quote(env.get("LOCAL_PROXY_PASS", ""), safe="")
@@ -613,6 +627,102 @@ def fetch_first_ip(opener, candidates, timeout):
         "url": "",
         "target": "all",
     }
+
+
+def status_exit_ip(check):
+    https = check.get("https", {})
+    http = check.get("http", {})
+    if https.get("ok") and https.get("ip"):
+        return https["ip"], "HTTPS"
+    if http.get("ok") and http.get("ip"):
+        return http["ip"], "HTTP"
+    return "", ""
+
+
+def fetch_fraud_score(ip, timeout=12):
+    if not ip or not is_global_ip(ip):
+        return {"ok": False, "ip": ip, "error": "exit IP tidak valid", "source": "proxycheck.io"}
+
+    url = FRAUD_CHECK_URL_TEMPLATE.format(ip=urllib.parse.quote(ip, safe=""))
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "spider-bridge-bot/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read(65536).decode("utf-8", errors="replace"))
+    except Exception as exc:
+        return {"ok": False, "ip": ip, "error": str(exc), "source": "proxycheck.io"}
+
+    if payload.get("status") != "ok":
+        return {
+            "ok": False,
+            "ip": ip,
+            "error": str(payload.get("message") or payload.get("status") or "unknown response"),
+            "source": "proxycheck.io",
+        }
+
+    details = payload.get(ip)
+    if not isinstance(details, dict):
+        return {"ok": False, "ip": ip, "error": "IP detail tidak ditemukan di response", "source": "proxycheck.io"}
+
+    risk = details.get("risk", "")
+    return {
+        "ok": True,
+        "ip": ip,
+        "risk": risk,
+        "proxy": details.get("proxy", ""),
+        "type": details.get("type", ""),
+        "provider": details.get("provider") or details.get("organisation") or "",
+        "asn": details.get("asn", ""),
+        "country": details.get("country", ""),
+        "isocode": details.get("isocode", ""),
+        "source": "proxycheck.io",
+        "error": "",
+    }
+
+
+def fraud_risk_level(risk):
+    try:
+        score = int(risk)
+    except (TypeError, ValueError):
+        return "unknown"
+    if score >= 75:
+        return "high"
+    if score >= 40:
+        return "medium"
+    return "low"
+
+
+def format_fraud_score(result):
+    if not result.get("ok"):
+        return "\n".join(
+            [
+                "Fraud score: <code>unavailable</code>",
+                f"Fraud score error: <code>{escape(result.get('error', 'unknown error'))}</code>",
+            ]
+        )
+
+    country = result.get("country", "")
+    isocode = result.get("isocode", "")
+    country_text = f"{country} ({isocode})" if country and isocode else country or isocode or "-"
+    provider = result.get("provider") or "-"
+    asn = result.get("asn") or "-"
+    proxy = result.get("proxy") or "-"
+    proxy_type = result.get("type") or "-"
+    risk = result.get("risk", "unknown")
+    level = fraud_risk_level(risk)
+    return "\n".join(
+        [
+            f"Fraud score: <code>{escape(risk)}/100</code> (<code>{escape(level)}</code>)",
+            f"Proxy/VPN flag: <code>{escape(proxy)}</code>",
+            f"IP type: <code>{escape(proxy_type)}</code>",
+            f"Provider: <code>{escape(provider)}</code>",
+            f"ASN: <code>{escape(asn)}</code>",
+            f"Country: <code>{escape(country_text)}</code>",
+            f"Source: <code>{escape(result.get('source', 'proxycheck.io'))}</code>",
+        ]
+    )
 
 
 def sanitize_text(text, env):
@@ -1042,16 +1152,16 @@ def format_single_check(label, result):
     if result["ok"] and result["ip"]:
         target = f" via {result.get('target')}" if result.get("target") else ""
         return [
-            f"{label}: <code>OK</code>",
+            f"{label}: ✅ <code>OK</code>",
             f"{label} exit IP{escape(target)}: <code>{escape(result['ip'])}</code>",
         ]
     if result["ok"]:
         return [
-            f"{label}: <code>UNKNOWN</code>",
+            f"{label}: ⚠️ <code>UNKNOWN</code>",
             f"{label} response: <code>{escape(result['raw'] or result['error'] or 'empty response')}</code>",
         ]
     return [
-        f"{label}: <code>FAIL</code>",
+        f"{label}: ❌ <code>FAIL</code>",
         f"{label} error: <code>{escape(result['error'])}</code>",
     ]
 
@@ -1097,11 +1207,11 @@ def format_check_result(label, result):
         detail = result["ip"] or result.get("status") or "OK"
         suffix = "exit IP" if result["ip"] else "status"
         target = f" via {result.get('target')}" if result.get("target") else ""
-        return [f"{label}: <code>OK</code>", f"{label} {suffix}{escape(target)}: <code>{escape(detail)}</code>"]
+        return [f"{label}: ✅ <code>OK</code>", f"{label} {suffix}{escape(target)}: <code>{escape(detail)}</code>"]
 
     detail = result.get("error") or result.get("status") or "unknown error"
     return [
-        f"{label}: <code>FAIL</code>",
+        f"{label}: ❌ <code>FAIL</code>",
         f"{label} error: <code>{escape(detail)}</code>",
     ]
 
@@ -1226,23 +1336,33 @@ def diagnostic_text(env):
 def status_text(env):
     country = env.get("SPIDER_COUNTRY_CODE") or "default"
     check = proxy_live_check(env, include_direct=True)
+    exit_ip, exit_source = status_exit_ip(check)
+    fraud = fetch_fraud_score(exit_ip) if exit_ip else {"ok": False, "ip": "", "error": "exit IP belum tersedia"}
     engine = bridge_engine(env)
     service_label = proxy_service_label(env)
     service_name = proxy_service_name(env)
-    return f"""<b>Spider Bridge Status</b>
+    proxy = proxy_line(env)
+    exit_line = f"{exit_ip} via {exit_source}" if exit_ip else "unavailable"
+    return f"""🕷️ <b>Spider Bridge Status</b>
 
-Engine: <code>{escape(engine)}</code>
-{service_label}: <code>{escape(service_state(service_name))}</code>
-Bot: <code>{escape(service_state("spider-bridge-bot"))}</code>
+⚙️ Engine: <code>{escape(engine)}</code>
+🔌 {service_label}: <code>{escape(service_state(service_name))}</code>
+🤖 Bot: <code>{escape(service_state("spider-bridge-bot"))}</code>
 
 {format_live_check(check, env)}
 
-Local proxy: <code>{escape((env.get("VPS_PUBLIC_IP") or "<VPS_IP>") + ":" + env.get("LOCAL_PROXY_PORT", "3128"))}</code>
-Local user: <code>{escape(env.get("LOCAL_PROXY_USER", ""))}</code>
-Spider pool: <code>{escape(env.get("SPIDER_PROXY_TYPE", "residential"))}</code>
-Spider country: <code>{escape(country)}</code>
-Spider country param: <code>{escape(env.get("SPIDER_COUNTRY_PARAM", "country_code"))}</code>
-Spider upstream: <code>{escape(upstream_endpoint(env))}</code>
+<blockquote>📋 Proxy siap dipakai
+{escape(proxy)}</blockquote>
+
+🌐 Exit IP: <code>{escape(exit_line)}</code>
+🛡️ <b>Fraud / Risk</b>
+{format_fraud_score(fraud)}
+
+🔐 Local user: <code>{escape(env.get("LOCAL_PROXY_USER", ""))}</code>
+🧬 Spider pool: <code>{escape(env.get("SPIDER_PROXY_TYPE", "residential"))}</code>
+📍 Spider country: <code>{escape(country)}</code>
+🏷️ Spider country param: <code>{escape(env.get("SPIDER_COUNTRY_PARAM", "country_code"))}</code>
+⬆️ Spider upstream: <code>{escape(upstream_endpoint(env))}</code>
 """
 
 
@@ -1506,7 +1626,7 @@ def handle_admin_command(token, update, env, command, args):
         return
 
     if command == "/status":
-        send_message(token, chat, status_text(env))
+        send_message(token, chat, status_text(env), proxy_copy_keyboard(env))
         return
 
     if command == "/countries":
@@ -1551,7 +1671,7 @@ def handle_admin_command(token, update, env, command, args):
         return
 
     if command == "/showproxy":
-        send_message(token, chat, f"<code>{escape(proxy_line(env))}</code>")
+        send_message(token, chat, f"📋 <b>Local Proxy</b>\n<code>{escape(proxy_line(env))}</code>", proxy_copy_keyboard(env))
         return
 
     if command == "/test":

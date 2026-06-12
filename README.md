@@ -328,6 +328,16 @@ ada di engine bridge atau service lokal. Jika direct Spider juga gagal, cek API
 key, saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
 Jika error berisi `Blocked by network blocker`, target test IP-check sedang
 diblok oleh policy Spider; coba target website real atau ganti pool/country.
+
+`/status` juga mengecek fraud/risk score untuk exit IP yang terdeteksi. Prioritas
+IP yang dicek adalah exit IP dari HTTPS, lalu HTTP jika HTTPS tidak tersedia.
+Lookup memakai `proxycheck.io`; jika API eksternal itu rate-limit atau timeout,
+status proxy tetap tampil dan fraud score ditandai unavailable.
+
+Pesan `/status` dan `/showproxy` menyertakan tombol copy proxy. Tombol ini
+memakai fitur `copy_text` Telegram; pada client Telegram lama, proxy tetap bisa
+di-copy manual dari teks `<code>...</code>`.
+
 Untuk test website real dari Telegram:
 
 ```text
