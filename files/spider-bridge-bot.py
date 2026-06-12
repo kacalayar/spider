@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
+import base64
 import html
 import json
 import os
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -15,6 +18,8 @@ APPLY_CMD = "/usr/local/sbin/spider-bridge-apply"
 STATE_DIR = "/var/lib/spider-bridge"
 COUNTRIES_CACHE_FILE = os.path.join(STATE_DIR, "countries.json")
 UPDATE_OFFSET_FILE = os.path.join(STATE_DIR, "telegram_update_offset")
+SQUID_CACHE_LOG = "/var/log/squid/cache.log"
+SQUID_ACCESS_LOG = "/var/log/squid/access.log"
 COUNTRY_SOURCE_URL = "https://spider.cloud/proxy-locations"
 COUNTRY_CACHE_TTL_SECONDS = 24 * 60 * 60
 COUNTRY_PAGE_SIZE = 40
@@ -64,6 +69,7 @@ Perintah:
 /setupstream https - ubah upstream Spider ke http/https
 /showproxy - tampilkan format ip:port:user:pass
 /test - test proxy lokal via Spider
+/diag - diagnosa Squid ke Spider upstream
 /apply - tulis ulang config dan restart Squid
 /setlocalpass PASSWORD - ubah password proxy lokal
 /setlocaluser USER - ubah user proxy lokal
@@ -353,6 +359,30 @@ def upstream_endpoint(env):
     return f"{scheme}://{host}:{upstream_port(env)}"
 
 
+def spider_password(env):
+    proxy_type = env.get("SPIDER_PROXY_TYPE", "residential").lower()
+    if proxy_type == "datacenter":
+        proxy_type = "isp"
+
+    password = f"proxy={proxy_type}"
+    country = env.get("SPIDER_COUNTRY_CODE", "")
+    country_param = env.get("SPIDER_COUNTRY_PARAM", "country_code")
+    if country:
+        country_value = country.lower() if country_param == "country" else country.upper()
+        password += f"&{country_param}={country_value}"
+
+    extra = env.get("SPIDER_EXTRA_PARAMS", "")
+    if extra:
+        password += f"&{extra}"
+
+    return password
+
+
+def spider_auth_header(env):
+    raw = f"{env.get('SPIDER_API_KEY', '')}:{spider_password(env)}".encode("utf-8")
+    return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
 def build_keyboard(kind):
     if kind == "pools":
         rows = []
@@ -477,6 +507,138 @@ def fetch_ip(opener, url, timeout):
     return {"ok": True, "ip": ip, "raw": body.strip(), "error": ""}
 
 
+def sanitize_text(text, env):
+    sanitized = str(text)
+    replacements = [
+        env.get("SPIDER_API_KEY", ""),
+        env.get("LOCAL_PROXY_PASS", ""),
+        spider_auth_header(env),
+    ]
+    for secret in replacements:
+        if secret:
+            sanitized = sanitized.replace(secret, "<redacted>")
+    return sanitized
+
+
+def read_http_response(sock, max_bytes=65536):
+    chunks = []
+    total = 0
+    while total < max_bytes:
+        chunk = sock.recv(min(8192, max_bytes - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def read_http_headers(sock, max_bytes=32768):
+    data = b""
+    while b"\r\n\r\n" not in data and len(data) < max_bytes:
+        chunk = sock.recv(min(4096, max_bytes - len(data)))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def parse_http_response(data):
+    header_bytes, _, body = data.partition(b"\r\n\r\n")
+    header_text = header_bytes.decode("iso-8859-1", errors="replace")
+    status_line = header_text.splitlines()[0] if header_text.splitlines() else ""
+    match = re.match(r"HTTP/\S+\s+(\d+)\s*(.*)", status_line)
+    code = int(match.group(1)) if match else 0
+    reason = match.group(2).strip() if match else status_line
+    body_text = body.decode("utf-8", errors="replace").strip()
+    return {"code": code, "reason": reason, "status_line": status_line, "body": body_text}
+
+
+def extract_ip_from_body(body):
+    if not body:
+        return ""
+    try:
+        payload = json.loads(body)
+        return str(payload.get("ip", "")).strip()
+    except json.JSONDecodeError:
+        match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", body)
+        return match.group(0) if match else ""
+
+
+def open_spider_proxy_socket(env, timeout=12):
+    host = env.get("SPIDER_UPSTREAM_HOST", "proxy.spider.cloud")
+    port = int(upstream_port(env))
+    sock = socket.create_connection((host, port), timeout=timeout)
+    sock.settimeout(timeout)
+    if upstream_scheme(env) == "https":
+        context = ssl.create_default_context()
+        sock = context.wrap_socket(sock, server_hostname=host)
+        sock.settimeout(timeout)
+    return sock
+
+
+def direct_spider_http_check(env):
+    sock = None
+    try:
+        sock = open_spider_proxy_socket(env)
+        request = (
+            "GET http://api.ipify.org?format=json HTTP/1.1\r\n"
+            "Host: api.ipify.org\r\n"
+            f"Proxy-Authorization: {spider_auth_header(env)}\r\n"
+            "User-Agent: spider-bridge-bot/1.0\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+        sock.sendall(request.encode("ascii"))
+        parsed = parse_http_response(read_http_response(sock))
+        ip = extract_ip_from_body(parsed["body"])
+        ok = parsed["code"] == 200 and bool(ip)
+        error = "" if ok else f"{parsed['status_line']} {parsed['body'][:240]}".strip()
+        return {"ok": ok, "ip": ip, "status": parsed["status_line"], "error": sanitize_text(error, env)}
+    except Exception as exc:
+        return {"ok": False, "ip": "", "status": "", "error": sanitize_text(str(exc), env)}
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def direct_spider_connect_check(env):
+    sock = None
+    try:
+        sock = open_spider_proxy_socket(env)
+        request = (
+            "CONNECT api.ipify.org:443 HTTP/1.1\r\n"
+            "Host: api.ipify.org:443\r\n"
+            f"Proxy-Authorization: {spider_auth_header(env)}\r\n"
+            "User-Agent: spider-bridge-bot/1.0\r\n"
+            "\r\n"
+        )
+        sock.sendall(request.encode("ascii"))
+        parsed = parse_http_response(read_http_headers(sock))
+        if parsed["code"] != 200:
+            error = f"{parsed['status_line']} {parsed['body'][:240]}".strip()
+            return {"ok": False, "ip": "", "status": parsed["status_line"], "error": sanitize_text(error, env)}
+
+        return {"ok": True, "ip": "", "status": parsed["status_line"], "error": ""}
+    except Exception as exc:
+        return {"ok": False, "ip": "", "status": "", "error": sanitize_text(str(exc), env)}
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def direct_spider_checks(env):
+    return {
+        "connect": direct_spider_connect_check(env),
+        "http": direct_spider_http_check(env),
+    }
+
+
 def proxy_live_check(env, include_direct=True):
     proxy_handler = urllib.request.ProxyHandler(
         {
@@ -536,7 +698,95 @@ def format_live_check(check, env):
 
     if not https["ok"] and "403" in https["error"] and upstream_scheme(env) == "http":
         lines.append("Hint: <code>HTTPS CONNECT ditolak saat upstream masih http/8888. Coba /setupstream https.</code>")
+    if ("502" in https["error"] or "502" in http["error"]) and not (https["ok"] or http["ok"]):
+        lines.append("Hint: <code>502 berasal dari jalur Squid ke Spider. Jalankan /diag.</code>")
 
+    return "\n".join(lines)
+
+
+def format_check_result(label, result):
+    if result["ok"]:
+        detail = result["ip"] or result.get("status") or "OK"
+        suffix = "exit IP" if result["ip"] else "status"
+        return [f"{label}: <code>OK</code>", f"{label} {suffix}: <code>{escape(detail)}</code>"]
+
+    detail = result.get("error") or result.get("status") or "unknown error"
+    return [
+        f"{label}: <code>FAIL</code>",
+        f"{label} error: <code>{escape(detail)}</code>",
+    ]
+
+
+def tail_file(path, env, max_lines=24, max_chars=1500):
+    if not os.path.exists(path):
+        return f"{path} tidak ada."
+
+    try:
+        with open(path, "rb") as handle:
+            try:
+                handle.seek(-65536, os.SEEK_END)
+            except OSError:
+                handle.seek(0)
+            data = handle.read().decode("utf-8", errors="replace")
+    except OSError as exc:
+        return f"Tidak bisa membaca {path}: {exc}"
+
+    lines = data.splitlines()[-max_lines:]
+    text = "\n".join(lines)[-max_chars:]
+    return sanitize_text(text or "(empty)", env)
+
+
+def diagnostic_text(env):
+    local_check = proxy_live_check(env, include_direct=True)
+    direct_check = direct_spider_checks(env)
+
+    lines = [
+        "<b>Spider Bridge Diagnostics</b>",
+        "",
+        f"Squid: <code>{escape(service_state('squid'))}</code>",
+        f"Bot: <code>{escape(service_state('spider-bridge-bot'))}</code>",
+        f"Spider upstream: <code>{escape(upstream_endpoint(env))}</code>",
+        f"Spider password params: <code>{escape(spider_password(env))}</code>",
+        "",
+        "<b>Via local Squid</b>",
+        format_live_check(local_check, env),
+        "",
+        "<b>Direct to Spider upstream</b>",
+    ]
+    lines.extend(format_check_result("Direct Spider HTTPS CONNECT", direct_check["connect"]))
+    lines.extend(format_check_result("Direct Spider HTTP", direct_check["http"]))
+
+    local_ok = local_check["https"]["ok"] or local_check["http"]["ok"]
+    direct_ok = direct_check["connect"]["ok"] or direct_check["http"]["ok"]
+    if direct_ok and not local_ok:
+        lines.extend(
+            [
+                "",
+                "Diagnosis: <code>Spider direct OK, Squid path FAIL.</code>",
+                "Fokus cek <code>cache_peer</code>, TLS parent Squid, dan cache.log.",
+            ]
+        )
+    elif not direct_ok:
+        lines.extend(
+            [
+                "",
+                "Diagnosis: <code>Direct Spider FAIL.</code>",
+                "Fokus cek API key Spider, saldo/quota, pool/country, atau akses outbound VPS ke Spider.",
+            ]
+        )
+    else:
+        lines.extend(["", "Diagnosis: <code>Proxy path OK.</code>"])
+
+    lines.extend(
+        [
+            "",
+            "<b>Squid cache.log tail</b>",
+            f"<code>{escape(tail_file(SQUID_CACHE_LOG, env))}</code>",
+            "",
+            "<b>Squid access.log tail</b>",
+            f"<code>{escape(tail_file(SQUID_ACCESS_LOG, env, max_lines=12, max_chars=900))}</code>",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -571,6 +821,7 @@ def set_my_commands(token):
         {"command": "setupstream", "description": "Set Spider upstream http/https"},
         {"command": "showproxy", "description": "Show ip:port:user:pass"},
         {"command": "test", "description": "Test local proxy"},
+        {"command": "diag", "description": "Diagnose Squid and Spider upstream"},
         {"command": "apply", "description": "Restart proxy with current config"},
         {"command": "whoami", "description": "Show your Telegram user ID"},
     ]
@@ -721,6 +972,11 @@ def handle_test(token, chat, env):
     send_message(token, chat, f"<b>Proxy Test</b>\n\n{format_live_check(check, env)}")
 
 
+def handle_diag(token, chat, env):
+    send_message(token, chat, "Menjalankan diagnosa Squid dan Spider upstream...")
+    send_message(token, chat, diagnostic_text(env))
+
+
 def countries_text(countries, source, error):
     note = f"Daftar country dari <code>{escape(source)}</code>. Total: <code>{len(countries)}</code>."
     if error:
@@ -803,6 +1059,10 @@ def handle_admin_command(token, update, env, command, args):
 
     if command == "/test":
         handle_test(token, chat, env)
+        return
+
+    if command == "/diag":
+        handle_diag(token, chat, env)
         return
 
     if command == "/apply":

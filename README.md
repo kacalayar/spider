@@ -243,6 +243,17 @@ dan upstream masih `http://proxy.spider.cloud:8888`, ganti ke endpoint HTTPS:
 /status
 ```
 
+Jika muncul `502 Bad Gateway`, jalankan:
+
+```text
+/diag
+```
+
+`/diag` akan membandingkan test lewat Squid dengan test langsung ke upstream
+Spider. Jika direct Spider berhasil tapi lewat Squid gagal, masalahnya ada di
+konfigurasi parent proxy Squid. Jika direct Spider juga gagal, cek API key,
+saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
+
 Jika bot berulang mengirim pesan `Menerapkan upstream...` tanpa command baru,
 upgrade ke versi terbaru. Versi lama membuat service bot bergantung langsung
 pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
@@ -262,6 +273,7 @@ pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
 /setupstream https
 /showproxy
 /test
+/diag
 /apply
 /setlocaluser USER
 /setlocalpass PASSWORD
