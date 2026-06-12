@@ -143,6 +143,43 @@ Atau dari Telegram:
 /setcountryparam country_code
 ```
 
+## Spider Upstream Port
+
+Default installer memakai upstream:
+
+```text
+http://proxy.spider.cloud:8888
+```
+
+Alasannya: VPS menjalankan Squid sebagai HTTP forward proxy. Untuk akses HTTPS,
+client tetap memakai method `CONNECT` ke proxy VPS, lalu Squid meneruskan tunnel
+itu ke parent proxy Spider. Payload HTTPS client tetap terenkripsi end-to-end ke
+website tujuan; port `8888` hanya berarti koneksi Squid ke parent proxy Spider
+memakai protokol HTTP proxy.
+
+Spider juga menyediakan endpoint HTTPS proxy:
+
+```text
+https://proxy.spider.cloud:8889
+```
+
+Jika ingin koneksi dari VPS ke Spider juga memakai TLS, install dengan:
+
+```bash
+sudo bash install.sh --spider-upstream-scheme https
+```
+
+Atau eksplisit:
+
+```bash
+sudo bash install.sh \
+  --spider-upstream-scheme https \
+  --spider-upstream-port 8889
+```
+
+Installer akan menambahkan opsi `tls` pada `cache_peer` Squid untuk mode
+`https`.
+
 ## Command Bot
 
 ```text

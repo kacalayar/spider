@@ -46,6 +46,14 @@ validate_country_param() {
   esac
 }
 
+validate_upstream_scheme() {
+  local value="$1"
+  case "$value" in
+    http|https) ;;
+    *) die "SPIDER_UPSTREAM_SCHEME must be http or https" ;;
+  esac
+}
+
 validate_proxy_type() {
   local value="$1"
   case "$value" in
@@ -65,7 +73,7 @@ load_env() {
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     [[ -n "$key" && "$key" != \#* ]] || continue
     case "$key" in
-      SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT)
+      SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_SCHEME|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT)
         printf -v "$key" '%s' "$value"
         ;;
     esac
@@ -115,8 +123,22 @@ build_upstream_password() {
 
 write_squid_conf() {
   local upstream_password="$1"
+  local upstream_scheme="${SPIDER_UPSTREAM_SCHEME:-http}"
   local upstream_host="${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}"
-  local upstream_port="${SPIDER_UPSTREAM_PORT:-8888}"
+  local upstream_port="${SPIDER_UPSTREAM_PORT:-}"
+  local upstream_tls_option=""
+
+  if [[ -z "$upstream_port" ]]; then
+    if [[ "$upstream_scheme" == "https" ]]; then
+      upstream_port="8889"
+    else
+      upstream_port="8888"
+    fi
+  fi
+
+  if [[ "$upstream_scheme" == "https" ]]; then
+    upstream_tls_option=" tls"
+  fi
 
   backup_squid_conf_once
 
@@ -149,7 +171,7 @@ access_log /var/log/squid/access.log squid
 cache_log /var/log/squid/cache.log
 cache_store_log none
 
-cache_peer ${upstream_host} parent ${upstream_port} 0 no-query default login=${SPIDER_API_KEY}:${upstream_password} name=spidercloud
+cache_peer ${upstream_host} parent ${upstream_port} 0 no-query default login=${SPIDER_API_KEY}:${upstream_password} name=spidercloud${upstream_tls_option}
 never_direct allow all
 EOF
 }
@@ -169,6 +191,7 @@ main() {
   : "${SPIDER_COUNTRY_CODE:=US}"
   : "${SPIDER_COUNTRY_PARAM:=country_code}"
   : "${SPIDER_EXTRA_PARAMS:=}"
+  : "${SPIDER_UPSTREAM_SCHEME:=http}"
 
   validate_token "SPIDER_API_KEY" "$SPIDER_API_KEY"
   validate_local_credential "LOCAL_PROXY_USER" "$LOCAL_PROXY_USER"
@@ -177,10 +200,21 @@ main() {
   validate_proxy_type "$SPIDER_PROXY_TYPE"
   validate_country "$SPIDER_COUNTRY_CODE"
   validate_country_param "$SPIDER_COUNTRY_PARAM"
+  validate_upstream_scheme "$SPIDER_UPSTREAM_SCHEME"
+  validate_port "${SPIDER_UPSTREAM_PORT:-8888}"
   validate_extra_params "$SPIDER_EXTRA_PARAMS"
 
   local upstream_password
+  local effective_upstream_port
   upstream_password="$(build_upstream_password)"
+  effective_upstream_port="${SPIDER_UPSTREAM_PORT:-}"
+  if [[ -z "$effective_upstream_port" ]]; then
+    if [[ "$SPIDER_UPSTREAM_SCHEME" == "https" ]]; then
+      effective_upstream_port="8889"
+    else
+      effective_upstream_port="8888"
+    fi
+  fi
 
   write_htpasswd
   write_squid_conf "$upstream_password"
@@ -189,10 +223,13 @@ main() {
   systemctl enable squid >/dev/null
   systemctl restart squid
 
-  printf 'Spider bridge applied: local port %s, pool %s, country %s\n' \
+  printf 'Spider bridge applied: local port %s, pool %s, country %s, upstream %s:%s (%s)\n' \
     "$LOCAL_PROXY_PORT" \
     "$SPIDER_PROXY_TYPE" \
-    "${SPIDER_COUNTRY_CODE:-default}"
+    "${SPIDER_COUNTRY_CODE:-default}" \
+    "${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}" \
+    "$effective_upstream_port" \
+    "$SPIDER_UPSTREAM_SCHEME"
 }
 
 main "$@"

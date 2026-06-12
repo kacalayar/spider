@@ -50,6 +50,9 @@ Options:
   --vps-public-ip VALUE        Public IP shown by /showproxy, default: auto-detect
   --extra-param VALUE          Optional single extra Spider password param, example: session=abc
   --repo-raw-url VALUE         Raw GitHub base URL for remote install files
+  --spider-upstream-scheme VALUE  Spider upstream scheme: http or https, default: http
+  --spider-upstream-host VALUE    Spider upstream host, default: proxy.spider.cloud
+  --spider-upstream-port VALUE    Spider upstream port, default: 8888 for http, 8889 for https
   --swap-size-gb VALUE         Swap file size in GB, default: 2, use 0 to skip
   --swap-file VALUE            Swap file path, default: /swapfile
   --no-swap                    Do not create or enable a swap file
@@ -147,6 +150,20 @@ validate_country_param() {
   esac
 }
 
+validate_upstream_scheme() {
+  local value="$1"
+  case "$value" in
+    http|https) ;;
+    *) die "SPIDER_UPSTREAM_SCHEME must be http or https" ;;
+  esac
+}
+
+validate_upstream_host() {
+  local value="$1"
+  [[ -n "$value" ]] || die "SPIDER_UPSTREAM_HOST cannot be empty"
+  [[ "$value" != *[[:space:]]* ]] || die "SPIDER_UPSTREAM_HOST cannot contain whitespace"
+}
+
 validate_proxy_type() {
   local value="$1"
   case "$value" in
@@ -235,6 +252,18 @@ parse_args() {
         REPO_RAW_URL="$2"
         shift 2
         ;;
+      --spider-upstream-scheme)
+        SPIDER_UPSTREAM_SCHEME="$2"
+        shift 2
+        ;;
+      --spider-upstream-host)
+        SPIDER_UPSTREAM_HOST="$2"
+        shift 2
+        ;;
+      --spider-upstream-port)
+        SPIDER_UPSTREAM_PORT="$2"
+        shift 2
+        ;;
       --swap-size-gb)
         SWAP_SIZE_GB="$2"
         shift 2
@@ -270,6 +299,7 @@ normalize_values() {
   SPIDER_PROXY_TYPE="${SPIDER_PROXY_TYPE,,}"
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE^^}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM,,}"
+  SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME,,}"
 
   case "$SPIDER_COUNTRY_CODE" in
     OFF|DEFAULT|NONE|-) SPIDER_COUNTRY_CODE="" ;;
@@ -285,6 +315,9 @@ validate_values() {
   validate_proxy_type "$SPIDER_PROXY_TYPE"
   validate_country "$SPIDER_COUNTRY_CODE"
   validate_country_param "$SPIDER_COUNTRY_PARAM"
+  validate_upstream_scheme "$SPIDER_UPSTREAM_SCHEME"
+  validate_upstream_host "$SPIDER_UPSTREAM_HOST"
+  validate_port "$SPIDER_UPSTREAM_PORT"
   validate_admin_ids "$TELEGRAM_ADMIN_IDS"
   validate_extra_param "$SPIDER_EXTRA_PARAMS"
   validate_swap_size "$SWAP_SIZE_GB"
@@ -406,6 +439,7 @@ SPIDER_PROXY_TYPE=${SPIDER_PROXY_TYPE}
 SPIDER_COUNTRY_CODE=${SPIDER_COUNTRY_CODE}
 SPIDER_COUNTRY_PARAM=${SPIDER_COUNTRY_PARAM}
 SPIDER_EXTRA_PARAMS=${SPIDER_EXTRA_PARAMS}
+SPIDER_UPSTREAM_SCHEME=${SPIDER_UPSTREAM_SCHEME}
 SPIDER_UPSTREAM_HOST=${SPIDER_UPSTREAM_HOST}
 SPIDER_UPSTREAM_PORT=${SPIDER_UPSTREAM_PORT}
 LOCAL_PROXY_USER=${LOCAL_PROXY_USER}
@@ -522,10 +556,19 @@ main() {
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE:-}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM:-country_code}"
   SPIDER_EXTRA_PARAMS="${SPIDER_EXTRA_PARAMS:-}"
-  SWAP_SIZE_GB="${SWAP_SIZE_GB:-${SPIDER_BRIDGE_SWAP_SIZE_GB:-}}"
+  SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME:-http}"
   SPIDER_UPSTREAM_HOST="${SPIDER_UPSTREAM_HOST:-proxy.spider.cloud}"
-  SPIDER_UPSTREAM_PORT="${SPIDER_UPSTREAM_PORT:-8888}"
+  SPIDER_UPSTREAM_PORT="${SPIDER_UPSTREAM_PORT:-}"
+  SWAP_SIZE_GB="${SWAP_SIZE_GB:-${SPIDER_BRIDGE_SWAP_SIZE_GB:-}}"
   VPS_PUBLIC_IP="${VPS_PUBLIC_IP:-}"
+
+  if [[ -z "$SPIDER_UPSTREAM_PORT" ]]; then
+    if [[ "${SPIDER_UPSTREAM_SCHEME,,}" == "https" ]]; then
+      SPIDER_UPSTREAM_PORT="8889"
+    else
+      SPIDER_UPSTREAM_PORT="8888"
+    fi
+  fi
 
   local generated_pass
   generated_pass="$(random_token)"

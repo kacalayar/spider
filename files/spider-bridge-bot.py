@@ -34,6 +34,7 @@ ENV_KEYS = [
     "SPIDER_COUNTRY_CODE",
     "SPIDER_COUNTRY_PARAM",
     "SPIDER_EXTRA_PARAMS",
+    "SPIDER_UPSTREAM_SCHEME",
     "SPIDER_UPSTREAM_HOST",
     "SPIDER_UPSTREAM_PORT",
     "LOCAL_PROXY_USER",
@@ -355,7 +356,7 @@ Local user: <code>{escape(env.get("LOCAL_PROXY_USER", ""))}</code>
 Spider pool: <code>{escape(env.get("SPIDER_PROXY_TYPE", "residential"))}</code>
 Spider country: <code>{escape(country)}</code>
 Spider country param: <code>{escape(env.get("SPIDER_COUNTRY_PARAM", "country_code"))}</code>
-Spider upstream: <code>{escape(env.get("SPIDER_UPSTREAM_HOST", "proxy.spider.cloud") + ":" + env.get("SPIDER_UPSTREAM_PORT", "8888"))}</code>
+Spider upstream: <code>{escape(env.get("SPIDER_UPSTREAM_SCHEME", "http") + "://" + env.get("SPIDER_UPSTREAM_HOST", "proxy.spider.cloud") + ":" + env.get("SPIDER_UPSTREAM_PORT", "8888"))}</code>
 """
 
 
