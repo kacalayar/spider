@@ -6,7 +6,10 @@ ENV_FILE="${ENV_DIR}/config.env"
 BOT_DIR="/opt/spider-bridge"
 BOT_FILE="${BOT_DIR}/bot.py"
 APPLY_FILE="/usr/local/sbin/spider-bridge-apply"
+UNINSTALL_FILE="/usr/local/sbin/spider-bridge-uninstall"
 SYSTEMD_FILE="/etc/systemd/system/spider-bridge-bot.service"
+REPO_RAW_URL="${SPIDER_BRIDGE_REPO_RAW_URL:-https://raw.githubusercontent.com/kacalayar/spider/main}"
+TMP_DIR=""
 
 NON_INTERACTIVE=0
 OPEN_UFW=1
@@ -17,8 +20,16 @@ die() {
 }
 
 log() {
-  printf '\n[spider-bridge] %s\n' "$*"
+  printf '\n[spider-bridge] %s\n' "$*" >&2
 }
+
+cleanup() {
+  if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
+    rm -rf -- "$TMP_DIR"
+  fi
+}
+
+trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
@@ -37,6 +48,7 @@ Options:
   --pool VALUE                 Spider proxy pool, default: residential
   --vps-public-ip VALUE        Public IP shown by /showproxy, default: auto-detect
   --extra-param VALUE          Optional single extra Spider password param, example: session=abc
+  --repo-raw-url VALUE         Raw GitHub base URL for remote install files
   --non-interactive            Fail instead of prompting for required values
   --no-open-ufw                Do not auto-open UFW port when UFW is active
   -h, --help                   Show this help
@@ -197,6 +209,10 @@ parse_args() {
         SPIDER_EXTRA_PARAMS="$2"
         shift 2
         ;;
+      --repo-raw-url)
+        REPO_RAW_URL="$2"
+        shift 2
+        ;;
       --non-interactive)
         NON_INTERACTIVE=1
         shift
@@ -254,6 +270,37 @@ detect_public_ip() {
   VPS_PUBLIC_IP="$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
 }
 
+ensure_tmp_dir() {
+  if [[ -z "$TMP_DIR" ]]; then
+    TMP_DIR="$(mktemp -d)"
+  fi
+}
+
+download_repo_file() {
+  local repo_path="$1"
+  local destination="$2"
+  local base_url="${REPO_RAW_URL%/}"
+
+  log "Downloading ${repo_path} from ${base_url}"
+  curl -fsSL "${base_url}/${repo_path}" -o "$destination"
+}
+
+resolve_source_file() {
+  local local_path="$1"
+  local repo_path="$2"
+  local output_name="$3"
+
+  if [[ -f "$local_path" ]]; then
+    printf '%s\n' "$local_path"
+    return 0
+  fi
+
+  ensure_tmp_dir
+  local destination="${TMP_DIR}/${output_name}"
+  download_repo_file "$repo_path" "$destination"
+  printf '%s\n' "$destination"
+}
+
 write_env_file() {
   install -d -m 0700 "$ENV_DIR"
   umask 077
@@ -278,14 +325,19 @@ EOF
 
 install_project_files() {
   local script_dir
+  local source_apply
+  local source_bot
+  local source_uninstall
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 
-  [[ -f "${script_dir}/files/spider-bridge-apply" ]] || die "Missing ${script_dir}/files/spider-bridge-apply"
-  [[ -f "${script_dir}/files/spider-bridge-bot.py" ]] || die "Missing ${script_dir}/files/spider-bridge-bot.py"
+  source_apply="$(resolve_source_file "${script_dir}/files/spider-bridge-apply" "files/spider-bridge-apply" "spider-bridge-apply")"
+  source_bot="$(resolve_source_file "${script_dir}/files/spider-bridge-bot.py" "files/spider-bridge-bot.py" "spider-bridge-bot.py")"
+  source_uninstall="$(resolve_source_file "${script_dir}/uninstall.sh" "uninstall.sh" "spider-bridge-uninstall")"
 
   install -d -m 0755 "$BOT_DIR"
-  install -m 0755 "${script_dir}/files/spider-bridge-apply" "$APPLY_FILE"
-  install -m 0755 "${script_dir}/files/spider-bridge-bot.py" "$BOT_FILE"
+  install -m 0755 "$source_apply" "$APPLY_FILE"
+  install -m 0755 "$source_bot" "$BOT_FILE"
+  install -m 0755 "$source_uninstall" "$UNINSTALL_FILE"
 }
 
 write_systemd_service() {
@@ -341,7 +393,7 @@ Proxy service:
   /usr/local/sbin/spider-bridge-apply
 
 Uninstall:
-  sudo bash uninstall.sh
+  sudo spider-bridge-uninstall
 EOF
 
   if [[ -n "$SETUP_TOKEN" ]]; then

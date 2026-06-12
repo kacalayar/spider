@@ -5,6 +5,7 @@ ENV_DIR="/etc/spider-bridge"
 STATE_DIR="/var/lib/spider-bridge"
 BOT_DIR="/opt/spider-bridge"
 APPLY_FILE="/usr/local/sbin/spider-bridge-apply"
+UNINSTALL_FILE="/usr/local/sbin/spider-bridge-uninstall"
 SYSTEMD_FILE="/etc/systemd/system/spider-bridge-bot.service"
 SQUID_CONF="/etc/squid/squid.conf"
 SQUID_USERS="/etc/squid/spider_bridge_users"
@@ -44,7 +45,7 @@ Options:
 Default behavior:
   - Stop and disable spider-bridge-bot.
   - Remove /etc/systemd/system/spider-bridge-bot.service.
-  - Remove /opt/spider-bridge and /usr/local/sbin/spider-bridge-apply.
+  - Remove /opt/spider-bridge and spider-bridge helper commands.
   - Remove /etc/spider-bridge and /var/lib/spider-bridge unless kept.
   - Remove /etc/squid/spider_bridge_users.
   - If /etc/squid/squid.conf is managed by spider-bridge, save it, then restore
@@ -234,6 +235,7 @@ main() {
   remove_path "$SYSTEMD_FILE"
   remove_path "$BOT_DIR"
   remove_path "$APPLY_FILE"
+  remove_path "$UNINSTALL_FILE"
   remove_path "$SQUID_USERS"
 
   if [[ "$KEEP_CONFIG" == "0" ]]; then

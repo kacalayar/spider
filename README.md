@@ -14,13 +14,53 @@ Referensi Spider:
 
 ## Install
 
-Jalankan di Ubuntu 24 sebagai root:
+### Dari GitHub
+
+Jalankan di Ubuntu 24:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
+sudo bash /tmp/spider-bridge-install.sh
+```
+
+Installer akan mengambil file pendukung dari repo GitHub ini jika folder `files/`
+tidak tersedia secara lokal:
+
+```text
+https://raw.githubusercontent.com/kacalayar/spider/main
+```
+
+Jika branch atau fork berbeda, override raw URL:
+
+```bash
+sudo bash /tmp/spider-bridge-install.sh \
+  --repo-raw-url https://raw.githubusercontent.com/kacalayar/spider/main
+```
+
+Mode non-interaktif dari GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
+sudo bash /tmp/spider-bridge-install.sh \
+  --spider-api-key "SPIDER_API_KEY" \
+  --telegram-bot-token "TELEGRAM_BOT_TOKEN" \
+  --telegram-admin-ids "123456789" \
+  --proxy-user "myuser" \
+  --proxy-pass "mypassword" \
+  --port 3128 \
+  --country ID \
+  --pool residential
+```
+
+### Dari Clone Repo
+
+Jika repo sudah di-clone:
 
 ```bash
 sudo bash install.sh
 ```
 
-Mode non-interaktif:
+Mode non-interaktif dari clone repo:
 
 ```bash
 sudo bash install.sh \
@@ -108,19 +148,19 @@ Apply ulang config:
 Dry-run dulu:
 
 ```bash
-sudo bash uninstall.sh --dry-run
+sudo spider-bridge-uninstall --dry-run
 ```
 
 Uninstall normal:
 
 ```bash
-sudo bash uninstall.sh
+sudo spider-bridge-uninstall
 ```
 
 Tanpa prompt:
 
 ```bash
-sudo bash uninstall.sh --yes
+sudo spider-bridge-uninstall --yes
 ```
 
 Default uninstaller menghapus service bot, file bridge, config `/etc/spider-bridge`,
@@ -129,7 +169,14 @@ cache `/var/lib/spider-bridge`, user file Squid, dan merestore backup Squid
 dihapus kecuali memakai:
 
 ```bash
-sudo bash uninstall.sh --yes --purge-packages
+sudo spider-bridge-uninstall --yes --purge-packages
+```
+
+Jika command `spider-bridge-uninstall` belum ada, ambil dari GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/uninstall.sh -o /tmp/spider-bridge-uninstall.sh
+sudo bash /tmp/spider-bridge-uninstall.sh
 ```
 
 Opsi berguna:
