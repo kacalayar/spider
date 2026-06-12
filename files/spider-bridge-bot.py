@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import html
+import ipaddress
 import json
 import os
 import re
@@ -549,6 +550,14 @@ def fetch_ip(opener, url, timeout):
             "error": "response does not contain an IP",
             "url": url,
         }
+    if not is_global_ip(ip):
+        return {
+            "ok": False,
+            "ip": "",
+            "raw": body.strip(),
+            "error": f"non-public IP returned: {ip}",
+            "url": url,
+        }
 
     return {"ok": True, "ip": ip, "raw": body.strip(), "error": "", "url": url}
 
@@ -633,6 +642,13 @@ def extract_ip_from_body(body):
     return match.group(0) if match else ""
 
 
+def is_global_ip(value):
+    try:
+        return ipaddress.ip_address(value).is_global
+    except ValueError:
+        return False
+
+
 def open_spider_proxy_socket(env, timeout=12):
     host = env.get("SPIDER_UPSTREAM_HOST", "proxy.spider.cloud")
     port = int(upstream_port(env))
@@ -667,7 +683,7 @@ def direct_spider_http_check(env):
             sock.sendall(request.encode("ascii"))
             parsed = parse_http_response(read_http_response(sock))
             ip = extract_ip_from_body(parsed["body"])
-            ok = parsed["code"] == 200 and bool(ip)
+            ok = parsed["code"] == 200 and bool(ip) and is_global_ip(ip)
             if ok:
                 return {
                     "ok": True,
@@ -676,7 +692,10 @@ def direct_spider_http_check(env):
                     "error": "",
                     "target": label,
                 }
-            error = f"{parsed['status_line']} {parsed['body'][:240]}".strip()
+            if ip and not is_global_ip(ip):
+                error = f"non-public IP returned: {ip}"
+            else:
+                error = f"{parsed['status_line']} {parsed['body'][:240]}".strip()
             failures.append(f"{label}: {sanitize_text(error, env)}")
         except Exception as exc:
             failures.append(f"{label}: {sanitize_text(str(exc), env)}")
@@ -809,7 +828,7 @@ def format_live_check(check, env):
             lines.append(f"Direct VPS IP: <code>unavailable ({escape(direct['error'])})</code>")
 
     if not https["ok"] and "403" in https["error"] and upstream_scheme(env) == "http":
-        lines.append("Hint: <code>HTTPS CONNECT ditolak saat upstream masih http/8888. Coba /setupstream https.</code>")
+        lines.append("Hint: <code>Spider menolak CONNECT ke target IP-check. Coba target website real atau ganti pool/country.</code>")
     if ("502" in https["error"] or "502" in http["error"]) and not (https["ok"] or http["ok"]):
         lines.append("Hint: <code>502 berasal dari jalur Squid ke Spider. Jalankan /diag.</code>")
     if "Blocked by network blocker" in https["error"] or "Blocked by network blocker" in http["error"]:

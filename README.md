@@ -266,6 +266,10 @@ gunakan:
 /setupstream http
 ```
 
+Jika HTTP check menampilkan exit IP `127.0.0.1`, upgrade dan apply ulang config.
+Versi terbaru menulis `forwarded_for delete` dan `via off` di Squid agar header
+client lokal tidak ikut diteruskan ke Spider/target.
+
 Jika bot berulang mengirim pesan `Menerapkan upstream...` tanpa command baru,
 upgrade ke versi terbaru. Versi lama membuat service bot bergantung langsung
 pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
