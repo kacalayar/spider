@@ -23,8 +23,18 @@ SQUID_ACCESS_LOG = "/var/log/squid/access.log"
 COUNTRY_SOURCE_URL = "https://spider.cloud/proxy-locations"
 COUNTRY_CACHE_TTL_SECONDS = 24 * 60 * 60
 COUNTRY_PAGE_SIZE = 40
-HTTPS_IP_CHECK_URL = "https://api.ipify.org?format=json"
-HTTP_IP_CHECK_URL = "http://api.ipify.org?format=json"
+HTTPS_IP_CHECK_URLS = [
+    ("api.ipify", "https://api.ipify.org?format=json"),
+    ("icanhazip", "https://icanhazip.com"),
+    ("ident.me", "https://ident.me"),
+    ("checkip.amazonaws", "https://checkip.amazonaws.com"),
+]
+HTTP_IP_CHECK_URLS = [
+    ("api.ipify", "http://api.ipify.org?format=json"),
+    ("icanhazip", "http://icanhazip.com"),
+    ("ident.me", "http://ident.me"),
+    ("checkip.amazonaws", "http://checkip.amazonaws.com"),
+]
 
 PROXY_TYPES = [
     "residential",
@@ -496,15 +506,38 @@ def fetch_ip(opener, url, timeout):
             with opener.open(request, timeout=timeout) as response:
                 body = response.read(4096).decode("utf-8", errors="replace")
     except Exception as exc:
-        return {"ok": False, "ip": "", "raw": "", "error": str(exc)}
+        return {"ok": False, "ip": "", "raw": "", "error": str(exc), "url": url}
 
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return {"ok": True, "ip": "", "raw": body.strip(), "error": "response is not JSON"}
+    ip = extract_ip_from_body(body)
+    if not ip:
+        return {
+            "ok": True,
+            "ip": "",
+            "raw": body.strip(),
+            "error": "response does not contain an IP",
+            "url": url,
+        }
 
-    ip = str(payload.get("ip", "")).strip()
-    return {"ok": True, "ip": ip, "raw": body.strip(), "error": ""}
+    return {"ok": True, "ip": ip, "raw": body.strip(), "error": "", "url": url}
+
+
+def fetch_first_ip(opener, candidates, timeout):
+    failures = []
+    for label, url in candidates:
+        result = fetch_ip(opener, url, timeout)
+        result["target"] = label
+        if result["ok"] and result["ip"]:
+            return result
+        failures.append(f"{label}: {result.get('error') or result.get('raw') or 'no IP'}")
+
+    return {
+        "ok": False,
+        "ip": "",
+        "raw": "",
+        "error": " | ".join(failures)[-1500:],
+        "url": "",
+        "target": "all",
+    }
 
 
 def sanitize_text(text, env):
@@ -558,10 +591,14 @@ def extract_ip_from_body(body):
         return ""
     try:
         payload = json.loads(body)
-        return str(payload.get("ip", "")).strip()
+        ip = str(payload.get("ip", "")).strip()
+        if ip:
+            return ip
     except json.JSONDecodeError:
-        match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", body)
-        return match.group(0) if match else ""
+        pass
+
+    match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", body)
+    return match.group(0) if match else ""
 
 
 def open_spider_proxy_socket(env, timeout=12):
@@ -577,59 +614,101 @@ def open_spider_proxy_socket(env, timeout=12):
 
 
 def direct_spider_http_check(env):
-    sock = None
-    try:
-        sock = open_spider_proxy_socket(env)
-        request = (
-            "GET http://api.ipify.org?format=json HTTP/1.1\r\n"
-            "Host: api.ipify.org\r\n"
-            f"Proxy-Authorization: {spider_auth_header(env)}\r\n"
-            "User-Agent: spider-bridge-bot/1.0\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-        )
-        sock.sendall(request.encode("ascii"))
-        parsed = parse_http_response(read_http_response(sock))
-        ip = extract_ip_from_body(parsed["body"])
-        ok = parsed["code"] == 200 and bool(ip)
-        error = "" if ok else f"{parsed['status_line']} {parsed['body'][:240]}".strip()
-        return {"ok": ok, "ip": ip, "status": parsed["status_line"], "error": sanitize_text(error, env)}
-    except Exception as exc:
-        return {"ok": False, "ip": "", "status": "", "error": sanitize_text(str(exc), env)}
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
+    failures = []
+    for label, url in HTTP_IP_CHECK_URLS:
+        sock = None
+        try:
+            parsed_url = urllib.parse.urlsplit(url)
+            target_host = parsed_url.netloc
+            target_path = urllib.parse.urlunsplit(("", "", parsed_url.path or "/", parsed_url.query, ""))
+            request_target = f"http://{target_host}{target_path}"
+
+            sock = open_spider_proxy_socket(env)
+            request = (
+                f"GET {request_target} HTTP/1.1\r\n"
+                f"Host: {target_host}\r\n"
+                f"Proxy-Authorization: {spider_auth_header(env)}\r\n"
+                "User-Agent: spider-bridge-bot/1.0\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            )
+            sock.sendall(request.encode("ascii"))
+            parsed = parse_http_response(read_http_response(sock))
+            ip = extract_ip_from_body(parsed["body"])
+            ok = parsed["code"] == 200 and bool(ip)
+            if ok:
+                return {
+                    "ok": True,
+                    "ip": ip,
+                    "status": parsed["status_line"],
+                    "error": "",
+                    "target": label,
+                }
+            error = f"{parsed['status_line']} {parsed['body'][:240]}".strip()
+            failures.append(f"{label}: {sanitize_text(error, env)}")
+        except Exception as exc:
+            failures.append(f"{label}: {sanitize_text(str(exc), env)}")
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    return {
+        "ok": False,
+        "ip": "",
+        "status": "",
+        "error": " | ".join(failures)[-1500:],
+        "target": "all",
+    }
 
 
 def direct_spider_connect_check(env):
-    sock = None
-    try:
-        sock = open_spider_proxy_socket(env)
-        request = (
-            "CONNECT api.ipify.org:443 HTTP/1.1\r\n"
-            "Host: api.ipify.org:443\r\n"
-            f"Proxy-Authorization: {spider_auth_header(env)}\r\n"
-            "User-Agent: spider-bridge-bot/1.0\r\n"
-            "\r\n"
-        )
-        sock.sendall(request.encode("ascii"))
-        parsed = parse_http_response(read_http_headers(sock))
-        if parsed["code"] != 200:
-            error = f"{parsed['status_line']} {parsed['body'][:240]}".strip()
-            return {"ok": False, "ip": "", "status": parsed["status_line"], "error": sanitize_text(error, env)}
+    failures = []
+    for label, url in HTTPS_IP_CHECK_URLS:
+        sock = None
+        try:
+            parsed_url = urllib.parse.urlsplit(url)
+            target_host = parsed_url.hostname or parsed_url.netloc
+            target_port = parsed_url.port or 443
 
-        return {"ok": True, "ip": "", "status": parsed["status_line"], "error": ""}
-    except Exception as exc:
-        return {"ok": False, "ip": "", "status": "", "error": sanitize_text(str(exc), env)}
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
+            sock = open_spider_proxy_socket(env)
+            request = (
+                f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
+                f"Host: {target_host}:{target_port}\r\n"
+                f"Proxy-Authorization: {spider_auth_header(env)}\r\n"
+                "User-Agent: spider-bridge-bot/1.0\r\n"
+                "\r\n"
+            )
+            sock.sendall(request.encode("ascii"))
+            parsed = parse_http_response(read_http_headers(sock))
+            if parsed["code"] == 200:
+                return {
+                    "ok": True,
+                    "ip": "",
+                    "status": parsed["status_line"],
+                    "error": "",
+                    "target": label,
+                }
+            error = f"{parsed['status_line']} {parsed['body'][:240]}".strip()
+            failures.append(f"{label}: {sanitize_text(error, env)}")
+        except Exception as exc:
+            failures.append(f"{label}: {sanitize_text(str(exc), env)}")
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    return {
+        "ok": False,
+        "ip": "",
+        "status": "",
+        "error": " | ".join(failures)[-1500:],
+        "target": "all",
+    }
 
 
 def direct_spider_checks(env):
@@ -647,22 +726,23 @@ def proxy_live_check(env, include_direct=True):
         }
     )
     proxy_opener = urllib.request.build_opener(proxy_handler)
-    https = fetch_ip(proxy_opener, HTTPS_IP_CHECK_URL, timeout=25)
-    http = fetch_ip(proxy_opener, HTTP_IP_CHECK_URL, timeout=25)
+    https = fetch_first_ip(proxy_opener, HTTPS_IP_CHECK_URLS, timeout=25)
+    http = fetch_first_ip(proxy_opener, HTTP_IP_CHECK_URLS, timeout=25)
 
     direct = None
     if include_direct:
         direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        direct = fetch_ip(direct_opener, HTTPS_IP_CHECK_URL, timeout=12)
+        direct = fetch_first_ip(direct_opener, HTTPS_IP_CHECK_URLS, timeout=12)
 
     return {"https": https, "http": http, "direct": direct}
 
 
 def format_single_check(label, result):
     if result["ok"] and result["ip"]:
+        target = f" via {result.get('target')}" if result.get("target") else ""
         return [
             f"{label}: <code>OK</code>",
-            f"{label} exit IP: <code>{escape(result['ip'])}</code>",
+            f"{label} exit IP{escape(target)}: <code>{escape(result['ip'])}</code>",
         ]
     if result["ok"]:
         return [
@@ -700,6 +780,8 @@ def format_live_check(check, env):
         lines.append("Hint: <code>HTTPS CONNECT ditolak saat upstream masih http/8888. Coba /setupstream https.</code>")
     if ("502" in https["error"] or "502" in http["error"]) and not (https["ok"] or http["ok"]):
         lines.append("Hint: <code>502 berasal dari jalur Squid ke Spider. Jalankan /diag.</code>")
+    if "Blocked by network blocker" in https["error"] or "Blocked by network blocker" in http["error"]:
+        lines.append("Hint: <code>Target IP-check diblok oleh Spider/network blocker. Status mencoba fallback target lain.</code>")
 
     return "\n".join(lines)
 
@@ -708,7 +790,8 @@ def format_check_result(label, result):
     if result["ok"]:
         detail = result["ip"] or result.get("status") or "OK"
         suffix = "exit IP" if result["ip"] else "status"
-        return [f"{label}: <code>OK</code>", f"{label} {suffix}: <code>{escape(detail)}</code>"]
+        target = f" via {result.get('target')}" if result.get("target") else ""
+        return [f"{label}: <code>OK</code>", f"{label} {suffix}{escape(target)}: <code>{escape(detail)}</code>"]
 
     detail = result.get("error") or result.get("status") or "unknown error"
     return [
@@ -767,11 +850,17 @@ def diagnostic_text(env):
             ]
         )
     elif not direct_ok:
+        blocked = "Blocked by network blocker" in direct_check["connect"]["error"] or "Blocked by network blocker" in direct_check["http"]["error"]
         lines.extend(
             [
                 "",
                 "Diagnosis: <code>Direct Spider FAIL.</code>",
-                "Fokus cek API key Spider, saldo/quota, pool/country, atau akses outbound VPS ke Spider.",
+                (
+                    "Target test diblok oleh Spider/network blocker. Coba target real yang ingin Anda akses, "
+                    "atau ganti pool/country."
+                    if blocked
+                    else "Fokus cek API key Spider, saldo/quota, pool/country, atau akses outbound VPS ke Spider."
+                ),
             ]
         )
     else:

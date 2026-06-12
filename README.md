@@ -213,8 +213,8 @@ Upstream juga bisa diganti dari Telegram setelah bot versi terbaru terpasang:
 ## Live Proxy Check
 
 Perintah `/status` dan `/test` melakukan request live lewat proxy lokal ke
-`https://api.ipify.org?format=json` dan `http://api.ipify.org?format=json`.
-Output akan menampilkan:
+beberapa target IP-check fallback (`api.ipify`, `icanhazip`, `ident.me`,
+`checkip.amazonaws`). Output akan menampilkan:
 
 ```text
 HTTPS CONNECT check: OK/FAIL
@@ -253,6 +253,8 @@ Jika muncul `502 Bad Gateway`, jalankan:
 Spider. Jika direct Spider berhasil tapi lewat Squid gagal, masalahnya ada di
 konfigurasi parent proxy Squid. Jika direct Spider juga gagal, cek API key,
 saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
+Jika error berisi `Blocked by network blocker`, target test IP-check sedang
+diblok oleh policy Spider; coba target website real atau ganti pool/country.
 
 Jika bot berulang mengirim pesan `Menerapkan upstream...` tanpa command baru,
 upgrade ke versi terbaru. Versi lama membuat service bot bergantung langsung
