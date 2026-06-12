@@ -177,6 +177,12 @@ never_direct allow all
 EOF
 }
 
+ensure_no_via_off() {
+  if grep -Eq '^[[:space:]]*via[[:space:]]+off([[:space:]]|$)' "$SQUID_CONF"; then
+    die "Squid config still contains 'via off'. Reinstall the latest spider-bridge files and run apply again."
+  fi
+}
+
 main() {
   require_command htpasswd
   require_command squid
@@ -221,6 +227,7 @@ main() {
 
   write_htpasswd
   write_squid_conf "$upstream_password"
+  ensure_no_via_off
 
   squid -k parse >/dev/null
   systemctl enable squid >/dev/null

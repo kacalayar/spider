@@ -278,6 +278,28 @@ Versi terbaru menulis `forwarded_for delete` di Squid agar header client lokal
 tidak ikut diteruskan ke Spider/target. Header `Via` tetap aktif karena proxy
 HTTP memang wajib menggunakannya.
 
+Jika saat install muncul warning:
+
+```text
+WARNING: HTTP requires the use of Via
+```
+
+berarti VPS masih memakai config/script lama yang berisi `via off`. Cek:
+
+```bash
+grep -n "via off" /etc/squid/squid.conf /usr/local/sbin/spider-bridge-apply
+```
+
+Jika masih ada output, jalankan ulang installer versi terbaru dari GitHub lalu
+apply ulang config:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
+sudo bash /tmp/spider-bridge-install.sh \
+  --spider-upstream-scheme http \
+  --spider-upstream-port 8888
+```
+
 Jika bot berulang mengirim pesan `Menerapkan upstream...` tanpa command baru,
 upgrade ke versi terbaru. Versi lama membuat service bot bergantung langsung
 pada `squid.service`, sehingga bot bisa ikut restart saat Squid di-restart oleh
