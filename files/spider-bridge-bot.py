@@ -17,7 +17,8 @@ COUNTRIES_CACHE_FILE = os.path.join(STATE_DIR, "countries.json")
 COUNTRY_SOURCE_URL = "https://spider.cloud/proxy-locations"
 COUNTRY_CACHE_TTL_SECONDS = 24 * 60 * 60
 COUNTRY_PAGE_SIZE = 40
-IP_CHECK_URL = "https://api.ipify.org?format=json"
+HTTPS_IP_CHECK_URL = "https://api.ipify.org?format=json"
+HTTP_IP_CHECK_URL = "http://api.ipify.org?format=json"
 
 PROXY_TYPES = [
     "residential",
@@ -217,6 +218,25 @@ def send_message(token, chat_id, text, reply_markup=None):
         telegram_api(token, "sendMessage", payload)
 
 
+def edit_message(token, chat_id, message_id, text, reply_markup=None):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        telegram_api(token, "editMessageText", payload)
+    except RuntimeError as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        raise
+
+
 def answer_callback(token, callback_id, text=""):
     telegram_api(
         token,
@@ -249,6 +269,12 @@ def chat_id(update):
     if "callback_query" in update:
         return update["callback_query"].get("message", {}).get("chat", {}).get("id")
     return None
+
+
+def callback_message_id(update):
+    if "callback_query" not in update:
+        return None
+    return update["callback_query"].get("message", {}).get("message_id")
 
 
 def is_admin(env, update):
@@ -284,8 +310,8 @@ def default_upstream_port(scheme):
 
 
 def upstream_scheme(env):
-    scheme = env.get("SPIDER_UPSTREAM_SCHEME", "http").lower()
-    return scheme if valid_upstream_scheme(scheme) else "http"
+    scheme = env.get("SPIDER_UPSTREAM_SCHEME", "https").lower()
+    return scheme if valid_upstream_scheme(scheme) else "https"
 
 
 def upstream_port(env):
@@ -331,7 +357,7 @@ def build_countries_keyboard(countries, page):
     nav = []
     if page > 0:
         nav.append({"text": "Prev", "callback_data": f"countries:{page - 1}"})
-    nav.append({"text": f"{page + 1}/{page_count}", "callback_data": f"countries:{page}"})
+    nav.append({"text": f"{page + 1}/{page_count}", "callback_data": f"noop:countries:{page}"})
     if page + 1 < page_count:
         nav.append({"text": "Next", "callback_data": f"countries:{page + 1}"})
     rows.append(nav)
@@ -377,9 +403,9 @@ def local_proxy_url(env):
     return f"http://{user}:{password}@127.0.0.1:{port}"
 
 
-def fetch_ip(opener, timeout):
+def fetch_ip(opener, url, timeout):
     request = urllib.request.Request(
-        IP_CHECK_URL,
+        url,
         headers={"User-Agent": "spider-bridge-bot/1.0"},
     )
     try:
@@ -409,46 +435,57 @@ def proxy_live_check(env, include_direct=True):
         }
     )
     proxy_opener = urllib.request.build_opener(proxy_handler)
-    proxied = fetch_ip(proxy_opener, timeout=25)
+    https = fetch_ip(proxy_opener, HTTPS_IP_CHECK_URL, timeout=25)
+    http = fetch_ip(proxy_opener, HTTP_IP_CHECK_URL, timeout=25)
 
     direct = None
     if include_direct:
         direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        direct = fetch_ip(direct_opener, timeout=12)
+        direct = fetch_ip(direct_opener, HTTPS_IP_CHECK_URL, timeout=12)
 
-    return {"proxied": proxied, "direct": direct}
+    return {"https": https, "http": http, "direct": direct}
 
 
-def format_live_check(check):
-    proxied = check["proxied"]
+def format_single_check(label, result):
+    if result["ok"] and result["ip"]:
+        return [
+            f"{label}: <code>OK</code>",
+            f"{label} exit IP: <code>{escape(result['ip'])}</code>",
+        ]
+    if result["ok"]:
+        return [
+            f"{label}: <code>UNKNOWN</code>",
+            f"{label} response: <code>{escape(result['raw'] or result['error'] or 'empty response')}</code>",
+        ]
+    return [
+        f"{label}: <code>FAIL</code>",
+        f"{label} error: <code>{escape(result['error'])}</code>",
+    ]
+
+
+def format_live_check(check, env):
+    https = check["https"]
+    http = check["http"]
     direct = check.get("direct")
 
-    if proxied["ok"] and proxied["ip"]:
-        lines = [
-            "Proxy live check: <code>OK</code>",
-            f"Exit IP via local proxy: <code>{escape(proxied['ip'])}</code>",
-        ]
-    elif proxied["ok"]:
-        lines = [
-            "Proxy live check: <code>UNKNOWN</code>",
-            f"Proxy response: <code>{escape(proxied['raw'] or proxied['error'] or 'empty response')}</code>",
-        ]
-    else:
-        lines = [
-            "Proxy live check: <code>FAIL</code>",
-            f"Proxy error: <code>{escape(proxied['error'])}</code>",
-        ]
+    lines = []
+    lines.extend(format_single_check("HTTPS CONNECT check", https))
+    lines.extend(format_single_check("HTTP check", http))
 
     if direct:
         if direct["ok"] and direct["ip"]:
             lines.append(f"Direct VPS IP: <code>{escape(direct['ip'])}</code>")
-            if proxied["ok"] and proxied["ip"]:
-                if proxied["ip"] == direct["ip"]:
+            comparison_ip = https["ip"] if https["ok"] and https["ip"] else http["ip"]
+            if comparison_ip:
+                if comparison_ip == direct["ip"]:
                     lines.append("Exit comparison: <code>SAME_AS_VPS</code>")
                 else:
                     lines.append("Exit comparison: <code>DIFFERENT_FROM_VPS</code>")
         elif not direct["ok"]:
             lines.append(f"Direct VPS IP: <code>unavailable ({escape(direct['error'])})</code>")
+
+    if not https["ok"] and "403" in https["error"] and upstream_scheme(env) == "http":
+        lines.append("Hint: <code>HTTPS CONNECT ditolak saat upstream masih http/8888. Coba /setupstream https.</code>")
 
     return "\n".join(lines)
 
@@ -461,7 +498,7 @@ def status_text(env):
 Squid: <code>{escape(service_state("squid"))}</code>
 Bot: <code>{escape(service_state("spider-bridge-bot"))}</code>
 
-{format_live_check(check)}
+{format_live_check(check, env)}
 
 Local proxy: <code>{escape((env.get("VPS_PUBLIC_IP") or "<VPS_IP>") + ":" + env.get("LOCAL_PROXY_PORT", "3128"))}</code>
 Local user: <code>{escape(env.get("LOCAL_PROXY_USER", ""))}</code>
@@ -626,24 +663,35 @@ def handle_set_upstream(token, chat, env, args):
 
 def handle_test(token, chat, env):
     check = proxy_live_check(env, include_direct=True)
-    send_message(token, chat, f"<b>Proxy Test</b>\n\n{format_live_check(check)}")
+    send_message(token, chat, f"<b>Proxy Test</b>\n\n{format_live_check(check, env)}")
 
 
-def handle_countries(token, chat, page=0, force_refresh=False):
-    countries, source, error = get_spider_countries(force_refresh=force_refresh)
-    if not countries:
-        send_message(
-            token,
-            chat,
-            f"Tidak bisa mengambil daftar country dari Spider.\n<code>{escape(error or 'unknown error')}</code>\n\n"
-            "Anda masih bisa set manual, contoh <code>/setcountry US</code>.",
-        )
-        return
-
+def countries_text(countries, source, error):
     note = f"Daftar country dari <code>{escape(source)}</code>. Total: <code>{len(countries)}</code>."
     if error:
         note += f"\nCache dipakai karena refresh gagal: <code>{escape(error)}</code>"
-    send_message(token, chat, note, build_countries_keyboard(countries, page))
+    return note
+
+
+def handle_countries(token, chat, page=0, force_refresh=False, edit_message_id=None):
+    countries, source, error = get_spider_countries(force_refresh=force_refresh)
+    if not countries:
+        text = (
+            f"Tidak bisa mengambil daftar country dari Spider.\n<code>{escape(error or 'unknown error')}</code>\n\n"
+            "Anda masih bisa set manual, contoh <code>/setcountry US</code>."
+        )
+        if edit_message_id:
+            edit_message(token, chat, edit_message_id, text)
+        else:
+            send_message(token, chat, text)
+        return
+
+    text = countries_text(countries, source, error)
+    keyboard = build_countries_keyboard(countries, page)
+    if edit_message_id:
+        edit_message(token, chat, edit_message_id, text, keyboard)
+    else:
+        send_message(token, chat, text, keyboard)
 
 
 def handle_admin_command(token, update, env, command, args):
@@ -804,22 +852,32 @@ def handle_callback(token, update):
         return
 
     try:
+        if data.startswith("noop:"):
+            answer_callback(token, callback["id"], "")
+            return
+
         if data.startswith("countries:"):
             page = int(data.split(":", 1)[1])
-            handle_countries(token, chat, page=page, force_refresh=False)
-            answer_callback(token, callback["id"], "Countries page")
+            answer_callback(token, callback["id"], "Membuka halaman country...")
+            handle_countries(
+                token,
+                chat,
+                page=page,
+                force_refresh=False,
+                edit_message_id=callback_message_id(update),
+            )
             return
 
         if data.startswith("country:"):
             value = data.split(":", 1)[1]
+            answer_callback(token, callback["id"], "Mengubah country...")
             handle_set_country(token, chat, env, value)
-            answer_callback(token, callback["id"], "Country updated")
             return
 
         if data.startswith("proxy:"):
             value = data.split(":", 1)[1]
+            answer_callback(token, callback["id"], "Mengubah pool...")
             handle_set_proxy(token, chat, env, value)
-            answer_callback(token, callback["id"], "Pool updated")
             return
 
         answer_callback(token, callback["id"], "Unknown action")

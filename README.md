@@ -91,7 +91,7 @@ sudo bash /tmp/spider-bridge-install.sh
 Jika `/etc/spider-bridge/config.env` sudah ada, installer memakai nilai lama
 sebagai default prompt. Argumen CLI tetap menang jika Anda ingin override.
 
-Contoh upgrade sekaligus pindah upstream Spider ke HTTPS `8889`:
+Contoh upgrade sekaligus memastikan upstream Spider memakai HTTPS `8889`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kacalayar/spider/main/install.sh -o /tmp/spider-bridge-install.sh
@@ -171,33 +171,32 @@ Atau dari Telegram:
 Default installer memakai upstream:
 
 ```text
-http://proxy.spider.cloud:8888
-```
-
-Alasannya: VPS menjalankan Squid sebagai HTTP forward proxy. Untuk akses HTTPS,
-client tetap memakai method `CONNECT` ke proxy VPS, lalu Squid meneruskan tunnel
-itu ke parent proxy Spider. Payload HTTPS client tetap terenkripsi end-to-end ke
-website tujuan; port `8888` hanya berarti koneksi Squid ke parent proxy Spider
-memakai protokol HTTP proxy.
-
-Spider juga menyediakan endpoint HTTPS proxy:
-
-```text
 https://proxy.spider.cloud:8889
 ```
 
-Jika ingin koneksi dari VPS ke Spider juga memakai TLS, install dengan:
+Spider menyediakan endpoint:
+
+```text
+http://proxy.spider.cloud:8888
+https://proxy.spider.cloud:8889
+```
+
+Endpoint `8889` dipakai sebagai default karena client proxy umumnya akan membuka
+website HTTPS lewat method `CONNECT`, dan dokumentasi Spider memisahkan endpoint
+HTTP dan HTTPS. Koneksi dari VPS ke parent proxy Spider juga memakai TLS.
+
+Jika ingin memaksa upstream HTTP `8888`, install dengan:
 
 ```bash
-sudo bash install.sh --spider-upstream-scheme https
+sudo bash install.sh --spider-upstream-scheme http
 ```
 
 Atau eksplisit:
 
 ```bash
 sudo bash install.sh \
-  --spider-upstream-scheme https \
-  --spider-upstream-port 8889
+  --spider-upstream-scheme http \
+  --spider-upstream-port 8888
 ```
 
 Installer akan menambahkan opsi `tls` pada `cache_peer` Squid untuk mode
@@ -214,19 +213,35 @@ Upstream juga bisa diganti dari Telegram setelah bot versi terbaru terpasang:
 ## Live Proxy Check
 
 Perintah `/status` dan `/test` melakukan request live lewat proxy lokal ke
-`https://api.ipify.org?format=json`. Output akan menampilkan:
+`https://api.ipify.org?format=json` dan `http://api.ipify.org?format=json`.
+Output akan menampilkan:
 
 ```text
-Proxy live check: OK/FAIL
-Exit IP via local proxy: ...
+HTTPS CONNECT check: OK/FAIL
+HTTPS CONNECT check exit IP: ...
+HTTP check: OK/FAIL
+HTTP check exit IP: ...
 Direct VPS IP: ...
 Exit comparison: DIFFERENT_FROM_VPS/SAME_AS_VPS
 ```
 
-Jika `Proxy live check` gagal, chain `client -> VPS Squid -> Spider` belum
-berhasil. Jika `Exit IP via local proxy` sama dengan `Direct VPS IP`, traffic
-belum keluar dengan IP berbeda dari VPS atau upstream Spider sedang memberi
-exit yang sama menurut target pengecekan.
+Jika check gagal, chain `client -> VPS Squid -> Spider` belum berhasil untuk
+jenis request tersebut. Jika exit IP sama dengan `Direct VPS IP`, traffic belum
+keluar dengan IP berbeda dari VPS atau upstream Spider sedang memberi exit yang
+sama menurut target pengecekan.
+
+Jika muncul:
+
+```text
+Tunnel connection failed: 403 Forbidden
+```
+
+dan upstream masih `http://proxy.spider.cloud:8888`, ganti ke endpoint HTTPS:
+
+```text
+/setupstream https
+/status
+```
 
 ## Command Bot
 
