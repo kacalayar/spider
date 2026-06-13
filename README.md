@@ -117,11 +117,10 @@ Local proxy tetap sama untuk client:
 VPS_IP:PORT:LOCAL_USER:LOCAL_PASS
 ```
 
-`/status` harus menampilkan:
+`/status` harus menampilkan engine GOST tanpa membuka detail upstream Spider:
 
 ```text
 Engine: gost
-Spider upstream: socks5://proxy.spider.cloud:8887
 ```
 
 Command migrasi ini tetap aman dijalankan:
@@ -269,8 +268,11 @@ Hapus user:
 Lihat user rental:
 
 ```text
-/users
+/listuser
 ```
+
+Output list menampilkan port, username, country, pool, tanggal expired, sisa
+masa aktif, dan status active/expired.
 
 User rental bisa memakai command:
 
@@ -314,6 +316,7 @@ HTTP check exit IP: ...
 Direct VPS IP: ...
 Exit comparison: DIFFERENT_FROM_VPS/SAME_AS_VPS
 Fraud score: ...
+Spider balance: ...
 ```
 
 Jika IP keluar berbeda dari `Direct VPS IP`, traffic sudah melewati Spider.
@@ -324,16 +327,18 @@ Jika target IP-check diblok oleh policy Spider, coba target website real:
 /testurl https://example.com
 ```
 
-`/diag` membandingkan test lewat proxy lokal dengan test langsung ke upstream
-Spider. Jika direct Spider berhasil tapi jalur lokal gagal, cek service
-`spider-bridge-proxy`. Jika direct Spider juga gagal, cek API key, saldo/quota
-Spider, pool/country, atau koneksi outbound VPS ke Spider.
+`/diag` khusus admin. Command ini membandingkan test lewat proxy lokal dengan
+test langsung ke upstream Spider. Jika direct Spider berhasil tapi jalur lokal
+gagal, cek service `spider-bridge-proxy`. Jika direct Spider juga gagal, cek API
+key, saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
 
 Pesan `/status` dan `/showproxy` menyertakan tombol copy proxy. Tombol ini
 memakai fitur `copy_text` Telegram; pada client Telegram lama, proxy tetap bisa
 di-copy manual dari teks `<code>...</code>`.
 
 ## Command Bot
+
+Command admin:
 
 ```text
 /status
@@ -351,6 +356,7 @@ di-copy manual dari teks `<code>...</code>`.
 /test
 /testurl https://example.com
 /diag
+/balance
 /apply
 /setlocaluser USER
 /setlocalpass PASSWORD
@@ -360,8 +366,10 @@ di-copy manual dari teks `<code>...</code>`.
 /deladmin USER_ID
 /adduser USER_ID 30d
 /deluser USER_ID
-/users
+/listuser
 ```
+
+Command user rental hanya command yang tercantum di bagian User Rental.
 
 ## Service
 

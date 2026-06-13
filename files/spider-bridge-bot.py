@@ -42,6 +42,7 @@ HTTP_IP_CHECK_URLS = [
     ("checkip.amazonaws", "http://checkip.amazonaws.com"),
 ]
 FRAUD_CHECK_URL_TEMPLATE = "https://proxycheck.io/v2/{ip}?risk=1&vpn=1&asn=1&node=1&time=1"
+SPIDER_CREDITS_URL = "https://api.spider.cloud/data/credits"
 TELEGRAM_SAFE_TEXT_LIMIT = 3500
 
 PROXY_TYPES = [
@@ -92,6 +93,7 @@ Perintah:
 /test - test proxy lokal via Spider
 /testurl https://example.com - test URL real lewat proxy lokal
 /diag - diagnosa bridge ke Spider upstream
+/balance - cek credit balance Spider
 /apply - tulis ulang config dan restart proxy
 /setlocalpass PASSWORD - ubah password proxy lokal
 /setlocaluser USER - ubah user proxy lokal
@@ -101,7 +103,7 @@ Perintah:
 /deladmin USER_ID - hapus admin
 /adduser USER_ID 30d - tambah user rental
 /deluser USER_ID - hapus user rental
-/users - lihat user rental
+/listuser - lihat user rental
 """
 
 USER_HELP_TEXT = """<b>Spider Bridge User</b>
@@ -260,6 +262,25 @@ def format_expiry(expires_at):
     if expires_at <= 0:
         return "never"
     return datetime.datetime.fromtimestamp(expires_at).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def format_time_remaining(expires_at):
+    expires_at = int(expires_at or 0)
+    if expires_at <= 0:
+        return "permanent"
+
+    seconds = expires_at - int(time.time())
+    if seconds <= 0:
+        return "expired"
+
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 def parse_expiry(value):
@@ -1012,6 +1033,87 @@ def format_fraud_score(result):
     )
 
 
+def fetch_spider_credits(env, timeout=12):
+    api_key = env.get("SPIDER_API_KEY", "")
+    if not api_key:
+        return {"ok": False, "error": "SPIDER_API_KEY belum dikonfigurasi", "source": "spider.cloud"}
+
+    request = urllib.request.Request(
+        SPIDER_CREDITS_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": "spider-bridge-bot/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read(65536).decode("utf-8", errors="replace"))
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "source": "spider.cloud"}
+
+    return {"ok": True, "payload": payload, "source": "spider.cloud"}
+
+
+def flatten_balance_payload(value, prefix="", depth=0):
+    if depth > 2:
+        return {}
+    if isinstance(value, dict):
+        flattened = {}
+        for key, item in value.items():
+            child_key = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(item, (dict, list)):
+                flattened.update(flatten_balance_payload(item, child_key, depth + 1))
+            elif item is not None:
+                flattened[child_key] = item
+        return flattened
+    if isinstance(value, list):
+        flattened = {}
+        for index, item in enumerate(value[:10]):
+            child_key = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            if isinstance(item, (dict, list)):
+                flattened.update(flatten_balance_payload(item, child_key, depth + 1))
+            elif item is not None:
+                flattened[child_key] = item
+        return flattened
+    return {prefix or "value": value}
+
+
+def format_spider_credits(result):
+    if not result.get("ok"):
+        return "\n".join(
+            [
+                "Spider balance: <code>unavailable</code>",
+                f"Spider balance error: <code>{escape(result.get('error', 'unknown error'))}</code>",
+            ]
+        )
+
+    payload = result.get("payload")
+    flattened = flatten_balance_payload(payload)
+    priority_words = ("credit", "balance", "remain", "available", "used", "usage", "quota", "limit")
+    selected = [
+        (key, value)
+        for key, value in flattened.items()
+        if any(word in key.lower() for word in priority_words)
+    ]
+    if not selected:
+        compact = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return "\n".join(
+            [
+                "Spider balance: <code>OK</code>",
+                f"Response: <code>{escape(compact[:900])}</code>",
+                f"Source: <code>{escape(result.get('source', 'spider.cloud'))}</code>",
+            ]
+        )
+
+    lines = ["Spider balance: <code>OK</code>"]
+    for key, value in selected[:8]:
+        lines.append(f"{escape(key)}: <code>{escape(value)}</code>")
+    lines.append(f"Source: <code>{escape(result.get('source', 'spider.cloud'))}</code>")
+    return "\n".join(lines)
+
+
 def sanitize_text(text, env):
     sanitized = str(text)
     replacements = [
@@ -1604,6 +1706,7 @@ def status_text(env):
     check = proxy_live_check(env, include_direct=True)
     exit_ip, exit_source = status_exit_ip(check)
     fraud = fetch_fraud_score(exit_ip) if exit_ip else {"ok": False, "ip": "", "error": "exit IP belum tersedia"}
+    balance = fetch_spider_credits(env)
     engine = bridge_engine(env)
     service_label = proxy_service_label(env)
     service_name = proxy_service_name(env)
@@ -1624,11 +1727,13 @@ def status_text(env):
 🛡️ <b>Fraud / Risk</b>
 {format_fraud_score(fraud)}
 
+💳 <b>Spider Balance</b>
+{format_spider_credits(balance)}
+
 🔐 Local user: <code>{escape(env.get("LOCAL_PROXY_USER", ""))}</code>
 🧬 Spider pool: <code>{escape(env.get("SPIDER_PROXY_TYPE", "residential"))}</code>
 📍 Spider country: <code>{escape(country)}</code>
 🏷️ Spider country param: <code>{escape(env.get("SPIDER_COUNTRY_PARAM", "country_code"))}</code>
-⬆️ Spider upstream: <code>{escape(upstream_endpoint(env))}</code>
 """
 
 
@@ -1658,7 +1763,6 @@ Exit IP: <code>{escape(exit_line)}</code>
 Local user: <code>{escape(cfg.get("LOCAL_PROXY_USER", ""))}</code>
 Spider pool: <code>{escape(cfg.get("SPIDER_PROXY_TYPE", "residential"))}</code>
 Spider country: <code>{escape(country)}</code>
-Spider upstream: <code>{escape(upstream_endpoint(cfg))}</code>
 """
 
 
@@ -1696,14 +1800,32 @@ ADMIN_COMMANDS = [
         {"command": "test", "description": "Test local proxy"},
         {"command": "testurl", "description": "Test a real URL through local proxy"},
         {"command": "diag", "description": "Diagnose bridge and Spider upstream"},
+        {"command": "balance", "description": "Show Spider balance"},
         {"command": "apply", "description": "Restart proxy with current config"},
         {"command": "whoami", "description": "Show your Telegram user ID"},
         {"command": "addadmin", "description": "Add bot admin"},
         {"command": "deladmin", "description": "Remove bot admin"},
         {"command": "adduser", "description": "Add rental proxy user"},
         {"command": "deluser", "description": "Remove rental proxy user"},
-        {"command": "users", "description": "List rental proxy users"},
+        {"command": "listuser", "description": "List rental proxy users"},
     ]
+
+ADMIN_ONLY_COMMANDS = {
+    "/diag",
+    "/balance",
+    "/apply",
+    "/setlocaluser",
+    "/setlocalpass",
+    "/setport",
+    "/setengine",
+    "/setupstream",
+    "/setcountryparam",
+    "/addadmin",
+    "/deladmin",
+    "/adduser",
+    "/deluser",
+    "/listuser",
+}
 
 
 def set_commands_for_chat(token, chat, commands):
@@ -2047,13 +2169,16 @@ def validate_user_port_choice(env, users, user_id, port):
 
 def format_user_summary(user_id, record):
     state = "active" if is_user_active(record) else "expired/disabled"
-    return (
-        f"<code>{escape(user_id)}</code> "
-        f"port=<code>{escape(record.get('port', ''))}</code> "
-        f"country=<code>{escape(record.get('country') or 'default')}</code> "
-        f"pool=<code>{escape(record.get('pool', 'residential'))}</code> "
-        f"exp=<code>{escape(format_expiry(record.get('expires_at', 0)))}</code> "
-        f"state=<code>{escape(state)}</code>"
+    return "\n".join(
+        [
+            f"<b>User</b> <code>{escape(user_id)}</code>",
+            f"Proxy: <code>{escape(record.get('port', ''))}:{escape(record.get('username', ''))}:{escape(record.get('password', ''))}</code>",
+            f"Country: <code>{escape(record.get('country') or 'default')}</code>",
+            f"Pool: <code>{escape(record.get('pool', 'residential'))}</code>",
+            f"Expired: <code>{escape(format_expiry(record.get('expires_at', 0)))}</code>",
+            f"Sisa: <code>{escape(format_time_remaining(record.get('expires_at', 0)))}</code>",
+            f"Status: <code>{escape(state)}</code>",
+        ]
     )
 
 
@@ -2160,6 +2285,7 @@ def handle_users(token, chat):
 
     lines = ["<b>User rental</b>"]
     for user_id in sorted(users, key=lambda item: int(item)):
+        lines.append("")
         lines.append(format_user_summary(user_id, users[user_id]))
     send_message(token, chat, "\n".join(lines))
 
@@ -2285,6 +2411,10 @@ def handle_admin_command(token, update, env, command, args):
         handle_diag(token, chat, env)
         return
 
+    if command == "/balance":
+        send_message(token, chat, f"<b>Spider Balance</b>\n{format_spider_credits(fetch_spider_credits(env))}")
+        return
+
     if command == "/apply":
         ok, output = run_apply()
         prefix = "Apply berhasil" if ok else "Apply gagal"
@@ -2366,7 +2496,7 @@ def handle_admin_command(token, update, env, command, args):
         handle_del_user(token, chat, args)
         return
 
-    if command == "/users":
+    if command == "/listuser":
         handle_users(token, chat)
         return
 
@@ -2423,6 +2553,10 @@ def handle_user_command(token, update, env, command, args, record):
 
     if command == "/testurl":
         handle_test_url(token, chat, cfg, args)
+        return
+
+    if command in ADMIN_ONLY_COMMANDS:
+        send_message(token, chat, "Perintah ini khusus admin.")
         return
 
     send_message(token, chat, "Perintah user tidak dikenal. Jalankan <code>/help</code>.")
