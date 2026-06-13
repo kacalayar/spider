@@ -49,6 +49,7 @@ Options:
 
 Default behavior:
   - Stop and disable spider-bridge-bot and spider-bridge-proxy when present.
+  - Stop and disable spider-bridge-user-*.service rental proxies when present.
   - Remove spider-bridge systemd service files.
   - Remove /opt/spider-bridge and spider-bridge helper commands.
   - Remove /etc/spider-bridge and /var/lib/spider-bridge unless kept.
@@ -100,6 +101,19 @@ stop_disable_service() {
   log "Stopping and disabling ${unit}"
   run systemctl stop "$unit" || true
   run systemctl disable "$unit" || true
+}
+
+stop_disable_user_proxy_services() {
+  systemctl_exists || return 0
+
+  shopt -s nullglob
+  local unit_path unit_name
+  for unit_path in /etc/systemd/system/spider-bridge-user-*.service; do
+    unit_name="$(basename "$unit_path")"
+    stop_disable_service "$unit_name"
+    remove_path "$unit_path"
+  done
+  shopt -u nullglob
 }
 
 daemon_reload() {
@@ -296,6 +310,7 @@ main() {
 
   stop_disable_service spider-bridge-bot.service
   stop_disable_service spider-bridge-proxy.service
+  stop_disable_user_proxy_services
 
   log "Removing systemd unit and bridge files"
   remove_path "$SYSTEMD_FILE"

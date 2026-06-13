@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import base64
+import datetime
 import html
 import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
 import subprocess
@@ -19,10 +21,14 @@ APPLY_CMD = "/usr/local/sbin/spider-bridge-apply"
 STATE_DIR = "/var/lib/spider-bridge"
 COUNTRIES_CACHE_FILE = os.path.join(STATE_DIR, "countries.json")
 UPDATE_OFFSET_FILE = os.path.join(STATE_DIR, "telegram_update_offset")
+USERS_FILE = os.path.join(STATE_DIR, "users.json")
 GOST_SERVICE_NAME = "spider-bridge-proxy"
+USER_SERVICE_PREFIX = "spider-bridge-user"
 COUNTRY_SOURCE_URL = "https://spider.cloud/proxy-locations"
 COUNTRY_CACHE_TTL_SECONDS = 24 * 60 * 60
 COUNTRY_PAGE_SIZE = 40
+USER_PORT_START = 32000
+USER_PORT_END = 32999
 HTTPS_IP_CHECK_URLS = [
     ("api.ipify", "https://api.ipify.org?format=json"),
     ("icanhazip", "https://icanhazip.com"),
@@ -93,6 +99,24 @@ Perintah:
 /whoami - lihat Telegram user ID
 /addadmin USER_ID - tambah admin
 /deladmin USER_ID - hapus admin
+/adduser USER_ID 30d - tambah user rental
+/deluser USER_ID - hapus user rental
+/users - lihat user rental
+"""
+
+USER_HELP_TEXT = """<b>Spider Bridge User</b>
+
+Perintah:
+/status - lihat proxy Anda
+/showproxy - tampilkan ip:port:user:pass
+/countries - pilih lokasi Spider
+/pools - pilih pool Spider
+/setcountry US - ubah lokasi proxy Anda
+/setcountry off - pakai default Spider
+/setproxy residential - ubah pool proxy Anda
+/test - test proxy Anda
+/testurl https://example.com - test URL real
+/whoami - lihat Telegram user ID
 """
 
 
@@ -193,6 +217,267 @@ def write_update_offset(offset):
         handle.write(f"{int(offset)}\n")
     os.chmod(tmp_path, 0o644)
     os.replace(tmp_path, UPDATE_OFFSET_FILE)
+
+
+def read_users():
+    if not os.path.exists(USERS_FILE):
+        return {}
+
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    users = payload.get("users", payload)
+    if not isinstance(users, dict):
+        return {}
+
+    valid = {}
+    for user_id, record in users.items():
+        if str(user_id).isdigit() and isinstance(record, dict):
+            valid[str(user_id)] = record
+    return valid
+
+
+def write_users(users):
+    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at": int(time.time()),
+        "users": users,
+    }
+    tmp_path = USERS_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, USERS_FILE)
+
+
+def format_expiry(expires_at):
+    expires_at = int(expires_at or 0)
+    if expires_at <= 0:
+        return "never"
+    return datetime.datetime.fromtimestamp(expires_at).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def parse_expiry(value):
+    raw = (value or "").strip()
+    lowered = raw.lower()
+    if lowered in {"never", "permanent", "permanen", "none", "0", "-"}:
+        return 0
+
+    now = datetime.datetime.now().astimezone()
+    match = re.fullmatch(r"(\d+)([mhdw]?)", lowered)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2) or "d"
+        if amount <= 0:
+            raise ValueError("durasi harus lebih dari 0")
+        if unit == "m":
+            delta = datetime.timedelta(minutes=amount)
+        elif unit == "h":
+            delta = datetime.timedelta(hours=amount)
+        elif unit == "w":
+            delta = datetime.timedelta(weeks=amount)
+        else:
+            delta = datetime.timedelta(days=amount)
+        return int((now + delta).timestamp())
+
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y/%m/%d %H:%M"):
+        try:
+            parsed = datetime.datetime.strptime(raw, fmt).replace(tzinfo=now.tzinfo)
+            break
+        except ValueError:
+            parsed = None
+    if parsed is None:
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                date_value = datetime.datetime.strptime(raw, fmt).date()
+                parsed = datetime.datetime.combine(date_value, datetime.time(23, 59, 59), tzinfo=now.tzinfo)
+                break
+            except ValueError:
+                parsed = None
+
+    if parsed is None:
+        raise ValueError("format expired: 30d, 12h, 2026-07-13, atau never")
+    if parsed.timestamp() <= now.timestamp():
+        raise ValueError("expired harus di masa depan")
+    return int(parsed.timestamp())
+
+
+def is_user_active(record):
+    if not record or not record.get("enabled", True):
+        return False
+    expires_at = int(record.get("expires_at", 0) or 0)
+    return expires_at <= 0 or expires_at > int(time.time())
+
+
+def user_service_name(user_id):
+    return f"{USER_SERVICE_PREFIX}-{int(user_id)}.service"
+
+
+def user_unit_path(user_id):
+    return f"/etc/systemd/system/{user_service_name(user_id)}"
+
+
+def random_local_credential(prefix, size=10):
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    suffix = "".join(secrets.choice(alphabet) for _ in range(size))
+    return f"{prefix}{suffix}"[:64]
+
+
+def port_available(port):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as handle:
+            handle.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            handle.bind(("0.0.0.0", int(port)))
+        return True
+    except OSError:
+        return False
+
+
+def allocate_user_port(env, users):
+    used = {str(record.get("port", "")) for record in users.values()}
+    used.add(str(env.get("LOCAL_PROXY_PORT", "3128")))
+    for port in range(USER_PORT_START, USER_PORT_END + 1):
+        if str(port) not in used and port_available(port):
+            return str(port)
+    raise RuntimeError(f"Tidak ada port kosong di range {USER_PORT_START}-{USER_PORT_END}")
+
+
+def user_config_env(env, record):
+    data = dict(env)
+    data["LOCAL_PROXY_USER"] = record.get("username", "")
+    data["LOCAL_PROXY_PASS"] = record.get("password", "")
+    data["LOCAL_PROXY_PORT"] = str(record.get("port", ""))
+    data["SPIDER_PROXY_TYPE"] = record.get("pool") or env.get("SPIDER_PROXY_TYPE", "residential")
+    data["SPIDER_COUNTRY_CODE"] = record.get("country", "")
+    data["SPIDER_COUNTRY_PARAM"] = record.get("country_param") or env.get("SPIDER_COUNTRY_PARAM", "country_code")
+    data["SPIDER_UPSTREAM_SCHEME"] = "socks5"
+    data["SPIDER_UPSTREAM_PORT"] = "8887"
+    return data
+
+
+def systemd_escape_percent(value):
+    return str(value).replace("%", "%%")
+
+
+def write_user_service(env, user_id, record):
+    cfg = user_config_env(env, record)
+    local_user = urllib.parse.quote(cfg.get("LOCAL_PROXY_USER", ""), safe="")
+    local_pass = urllib.parse.quote(cfg.get("LOCAL_PROXY_PASS", ""), safe="")
+    spider_user = urllib.parse.quote(cfg.get("SPIDER_API_KEY", ""), safe="")
+    spider_pass = urllib.parse.quote(spider_password(cfg), safe="")
+    upstream_host = cfg.get("SPIDER_UPSTREAM_HOST", "proxy.spider.cloud")
+    local_url = f"http://{local_user}:{local_pass}@0.0.0.0:{cfg.get('LOCAL_PROXY_PORT')}"
+    upstream_url = f"socks5://{spider_user}:{spider_pass}@{upstream_host}:8887"
+    expires_at = int(record.get("expires_at", 0) or 0)
+    exec_start_pre = ""
+    if expires_at > 0:
+        exec_start_pre = f"ExecStartPre=/bin/sh -c 'test \"$(date +%%s)\" -lt {expires_at}'\n"
+
+    unit = f"""[Unit]
+Description=Spider Bridge User Proxy {user_id}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+{exec_start_pre}ExecStart=/usr/local/bin/gost -L {systemd_escape_percent(local_url)} -F {systemd_escape_percent(upstream_url)}
+Restart=on-failure
+RestartSec=3
+User=root
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+"""
+    path = user_unit_path(user_id)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        handle.write(unit)
+    os.chmod(tmp_path, 0o644)
+    os.replace(tmp_path, path)
+
+
+def systemctl(*args, timeout=30):
+    return subprocess.run(
+        ["systemctl", *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def open_ufw_port(port):
+    try:
+        status = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=8, check=False)
+    except Exception:
+        return
+    if re.search(r"^Status:\s+active", status.stdout, re.IGNORECASE | re.MULTILINE):
+        subprocess.run(["ufw", "allow", f"{port}/tcp"], capture_output=True, text=True, timeout=20, check=False)
+
+
+def apply_user_service(env, user_id, record):
+    if not is_user_active(record):
+        stop_user_service(user_id, remove_unit=False)
+        return False, "User sudah expired atau disabled."
+
+    write_user_service(env, user_id, record)
+    outputs = []
+    for args in (("daemon-reload",), ("enable", user_service_name(user_id)), ("restart", user_service_name(user_id))):
+        result = systemctl(*args, timeout=45)
+        output = (result.stdout + "\n" + result.stderr).strip()
+        if output:
+            outputs.append(output[-800:])
+        if result.returncode != 0:
+            return False, "\n".join(outputs) or f"systemctl {' '.join(args)} gagal"
+    open_ufw_port(record.get("port", ""))
+    return True, f"{user_service_name(user_id)} active on port {record.get('port')}"
+
+
+def stop_user_service(user_id, remove_unit=True):
+    outputs = []
+    service = user_service_name(user_id)
+    for args in (("disable", "--now", service),):
+        result = systemctl(*args, timeout=45)
+        output = (result.stdout + "\n" + result.stderr).strip()
+        if output:
+            outputs.append(output[-800:])
+    if remove_unit:
+        try:
+            os.remove(user_unit_path(user_id))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            outputs.append(str(exc))
+    systemctl("daemon-reload", timeout=30)
+    return "\n".join(outputs).strip()
+
+
+def reconcile_user_services(env, users=None, token=None):
+    users = users if users is not None else read_users()
+    changed = False
+    for user_id, record in users.items():
+        if is_user_active(record):
+            continue
+        if record.get("enabled", True):
+            record["enabled"] = False
+            record["updated_at"] = int(time.time())
+            changed = True
+        stop_user_service(user_id, remove_unit=False)
+        if token:
+            try:
+                set_commands_for_chat(token, user_id, PUBLIC_COMMANDS)
+            except Exception as exc:
+                log(f"Unable to reset expired user commands for {user_id}: {exc}")
+    if changed:
+        write_users(users)
 
 
 def fetch_spider_countries():
@@ -553,12 +838,16 @@ def proxy_line(env):
 
 
 def proxy_copy_keyboard(env):
+    return proxy_copy_keyboard_for_text(proxy_line(env))
+
+
+def proxy_copy_keyboard_for_text(text):
     return {
         "inline_keyboard": [
             [
                 {
                     "text": "Copy proxy",
-                    "copy_text": {"text": proxy_line(env)},
+                    "copy_text": {"text": text},
                 }
             ]
         ]
@@ -1343,8 +1632,57 @@ def status_text(env):
 """
 
 
-def set_my_commands(token):
-    commands = [
+def user_status_text(env, user_id, record):
+    cfg = user_config_env(env, record)
+    country = cfg.get("SPIDER_COUNTRY_CODE") or "default"
+    check = proxy_live_check(cfg, include_direct=True)
+    exit_ip, exit_source = status_exit_ip(check)
+    fraud = fetch_fraud_score(exit_ip) if exit_ip else {"ok": False, "ip": "", "error": "exit IP belum tersedia"}
+    proxy = proxy_line(cfg)
+    exit_line = f"{exit_ip} via {exit_source}" if exit_ip else "unavailable"
+    return f"""<b>Spider Bridge User Status</b>
+
+Telegram ID: <code>{escape(user_id)}</code>
+Service: <code>{escape(service_state(user_service_name(user_id)))}</code>
+Expired: <code>{escape(format_expiry(record.get("expires_at", 0)))}</code>
+
+{format_live_check(check, cfg)}
+
+<blockquote>Proxy Anda
+{escape(proxy)}</blockquote>
+
+Exit IP: <code>{escape(exit_line)}</code>
+<b>Fraud / Risk</b>
+{format_fraud_score(fraud)}
+
+Local user: <code>{escape(cfg.get("LOCAL_PROXY_USER", ""))}</code>
+Spider pool: <code>{escape(cfg.get("SPIDER_PROXY_TYPE", "residential"))}</code>
+Spider country: <code>{escape(country)}</code>
+Spider upstream: <code>{escape(upstream_endpoint(cfg))}</code>
+"""
+
+
+PUBLIC_COMMANDS = [
+    {"command": "start", "description": "Start bot"},
+    {"command": "help", "description": "Show help"},
+    {"command": "whoami", "description": "Show your Telegram user ID"},
+    {"command": "claim", "description": "Claim first admin"},
+]
+
+USER_COMMANDS = [
+    {"command": "status", "description": "Show your proxy status"},
+    {"command": "showproxy", "description": "Show your proxy"},
+    {"command": "countries", "description": "Choose Spider location"},
+    {"command": "refreshcountries", "description": "Refresh Spider locations"},
+    {"command": "pools", "description": "Choose Spider proxy pool"},
+    {"command": "setcountry", "description": "Set your country"},
+    {"command": "setproxy", "description": "Set your pool"},
+    {"command": "test", "description": "Test your proxy"},
+    {"command": "testurl", "description": "Test a URL through proxy"},
+    {"command": "whoami", "description": "Show your Telegram user ID"},
+]
+
+ADMIN_COMMANDS = [
         {"command": "status", "description": "Show bridge status"},
         {"command": "countries", "description": "Choose Spider location"},
         {"command": "refreshcountries", "description": "Refresh Spider locations"},
@@ -1360,8 +1698,42 @@ def set_my_commands(token):
         {"command": "diag", "description": "Diagnose bridge and Spider upstream"},
         {"command": "apply", "description": "Restart proxy with current config"},
         {"command": "whoami", "description": "Show your Telegram user ID"},
+        {"command": "addadmin", "description": "Add bot admin"},
+        {"command": "deladmin", "description": "Remove bot admin"},
+        {"command": "adduser", "description": "Add rental proxy user"},
+        {"command": "deluser", "description": "Remove rental proxy user"},
+        {"command": "users", "description": "List rental proxy users"},
     ]
-    telegram_api(token, "setMyCommands", {"commands": commands}, timeout=10)
+
+
+def set_commands_for_chat(token, chat, commands):
+    payload = {
+        "commands": commands,
+        "scope": {
+            "type": "chat",
+            "chat_id": int(chat),
+        },
+    }
+    telegram_api(token, "setMyCommands", payload, timeout=10)
+
+
+def set_my_commands(token, env):
+    telegram_api(token, "setMyCommands", {"commands": PUBLIC_COMMANDS}, timeout=10)
+
+    users = read_users()
+    for user_id, record in users.items():
+        if not is_user_active(record):
+            continue
+        try:
+            set_commands_for_chat(token, user_id, USER_COMMANDS)
+        except Exception as exc:
+            log(f"Unable to set user commands for {user_id}: {exc}")
+
+    for admin_id in parse_admin_ids(env.get("TELEGRAM_ADMIN_IDS", "")):
+        try:
+            set_commands_for_chat(token, admin_id, ADMIN_COMMANDS)
+        except Exception as exc:
+            log(f"Unable to set admin commands for {admin_id}: {exc}")
 
 
 def claim_admin(token, update, env, args):
@@ -1382,6 +1754,10 @@ def claim_admin(token, update, env, args):
     env["TELEGRAM_ADMIN_IDS"] = ",".join(str(item) for item in sorted(ids))
     env["SETUP_TOKEN"] = ""
     save_env(env)
+    try:
+        set_commands_for_chat(token, user, ADMIN_COMMANDS)
+    except Exception as exc:
+        log(f"Unable to set claimed admin commands for {user}: {exc}")
     send_message(token, chat, "Admin berhasil diklaim. Jalankan <code>/status</code>.")
 
 
@@ -1591,6 +1967,256 @@ def handle_countries(token, chat, page=0, force_refresh=False, edit_message_id=N
         send_message(token, chat, text, keyboard)
 
 
+def normalize_country_arg(value):
+    normalized = (value or "").upper()
+    if normalized in {"OFF", "DEFAULT", "NONE", "-"}:
+        normalized = ""
+    if not valid_country(normalized):
+        raise ValueError("Country harus ISO 2 huruf, contoh US, ID, atau off.")
+    return normalized
+
+
+def parse_user_options(env, tokens):
+    options = {
+        "country": env.get("SPIDER_COUNTRY_CODE", "US"),
+        "pool": env.get("SPIDER_PROXY_TYPE", "residential"),
+        "country_param": env.get("SPIDER_COUNTRY_PARAM", "country_code"),
+        "username": "",
+        "password": "",
+        "port": "",
+    }
+
+    for token in tokens:
+        if "=" in token:
+            key, value = token.split("=", 1)
+            key = key.lower()
+        else:
+            key, value = "", token
+
+        lower_value = value.lower()
+        if key in {"country", "c"}:
+            options["country"] = normalize_country_arg(value)
+        elif key in {"pool", "proxy", "p"}:
+            pool = lower_value
+            if pool == "datacenter":
+                pool = "isp"
+            if pool not in PROXY_TYPES:
+                raise ValueError("Pool tidak didukung. Gunakan residential, mobile, isp, atau default.")
+            options["pool"] = pool
+        elif key in {"user", "username", "u"}:
+            if not valid_local_credential(value):
+                raise ValueError("Username proxy harus 3-64 chars: A-Z a-z 0-9 . _ -")
+            options["username"] = value
+        elif key in {"pass", "password", "pw"}:
+            if not valid_local_credential(value):
+                raise ValueError("Password proxy harus 3-64 chars: A-Z a-z 0-9 . _ -")
+            options["password"] = value
+        elif key == "port":
+            if not valid_port(value):
+                raise ValueError("Port harus angka 1-65535.")
+            options["port"] = value
+        elif not key and lower_value in PROXY_TYPES:
+            options["pool"] = lower_value
+        elif not key and lower_value == "datacenter":
+            options["pool"] = "isp"
+        elif not key:
+            options["country"] = normalize_country_arg(value)
+        else:
+            raise ValueError(f"Opsi tidak dikenal: {token}")
+
+    options["country"] = normalize_country_arg(options["country"])
+    if options["pool"] == "datacenter":
+        options["pool"] = "isp"
+    if options["pool"] not in PROXY_TYPES:
+        raise ValueError("Pool tidak didukung.")
+    if not valid_country_param(options["country_param"]):
+        options["country_param"] = "country_code"
+    return options
+
+
+def validate_user_port_choice(env, users, user_id, port):
+    if str(port) == str(env.get("LOCAL_PROXY_PORT", "3128")):
+        raise ValueError("Port sudah dipakai proxy utama.")
+    for other_id, record in users.items():
+        if str(other_id) != str(user_id) and str(record.get("port", "")) == str(port):
+            raise ValueError(f"Port sudah dipakai user {other_id}.")
+    existing = users.get(str(user_id), {})
+    if str(existing.get("port", "")) != str(port) and not port_available(port):
+        raise ValueError(f"Port {port} sedang dipakai service lain.")
+
+
+def format_user_summary(user_id, record):
+    state = "active" if is_user_active(record) else "expired/disabled"
+    return (
+        f"<code>{escape(user_id)}</code> "
+        f"port=<code>{escape(record.get('port', ''))}</code> "
+        f"country=<code>{escape(record.get('country') or 'default')}</code> "
+        f"pool=<code>{escape(record.get('pool', 'residential'))}</code> "
+        f"exp=<code>{escape(format_expiry(record.get('expires_at', 0)))}</code> "
+        f"state=<code>{escape(state)}</code>"
+    )
+
+
+def handle_add_user(token, chat, env, args):
+    if len(args) < 2 or not args[0].isdigit():
+        send_message(
+            token,
+            chat,
+            "Contoh: <code>/adduser 123456789 30d country=SG pool=default</code>\n"
+            "Expired bisa <code>12h</code>, <code>30d</code>, <code>2026-07-13</code>, atau <code>never</code>.",
+        )
+        return
+
+    user_id = str(int(args[0]))
+    try:
+        expires_at = parse_expiry(args[1])
+        options = parse_user_options(env, args[2:])
+    except ValueError as exc:
+        send_message(token, chat, f"Format /adduser salah: <code>{escape(exc)}</code>")
+        return
+
+    users = read_users()
+    existing = users.get(user_id, {})
+    username = options["username"] or existing.get("username") or random_local_credential("u", 11)
+    password = options["password"] or existing.get("password") or random_local_credential("p", 14)
+    port = options["port"] or existing.get("port") or allocate_user_port(env, users)
+
+    try:
+        validate_user_port_choice(env, users, user_id, port)
+    except ValueError as exc:
+        send_message(token, chat, f"Tidak bisa membuat user: <code>{escape(exc)}</code>")
+        return
+
+    now = int(time.time())
+    record = {
+        "telegram_id": user_id,
+        "username": username,
+        "password": password,
+        "port": str(port),
+        "country": options["country"],
+        "pool": options["pool"],
+        "country_param": options["country_param"],
+        "expires_at": expires_at,
+        "enabled": True,
+        "created_at": int(existing.get("created_at", now) or now),
+        "updated_at": now,
+    }
+
+    ok, output = apply_user_service(env, user_id, record)
+    if not ok:
+        send_message(token, chat, f"Gagal membuat service user:\n<code>{escape(output)}</code>")
+        return
+
+    users[user_id] = record
+    write_users(users)
+    try:
+        set_commands_for_chat(token, user_id, USER_COMMANDS)
+    except Exception as exc:
+        log(f"Unable to set user commands for {user_id}: {exc}")
+    cfg = user_config_env(env, record)
+    proxy = proxy_line(cfg)
+    send_message(
+        token,
+        chat,
+        (
+            "<b>User proxy aktif</b>\n"
+            f"Telegram ID: <code>{escape(user_id)}</code>\n"
+            f"Expired: <code>{escape(format_expiry(expires_at))}</code>\n"
+            f"Country: <code>{escape(record['country'] or 'default')}</code>\n"
+            f"Pool: <code>{escape(record['pool'])}</code>\n\n"
+            f"<code>{escape(proxy)}</code>"
+        ),
+        proxy_copy_keyboard_for_text(proxy),
+    )
+
+
+def handle_del_user(token, chat, args):
+    if not args or not args[0].isdigit():
+        send_message(token, chat, "Contoh: <code>/deluser 123456789</code>")
+        return
+
+    user_id = str(int(args[0]))
+    users = read_users()
+    if user_id not in users:
+        send_message(token, chat, "User tidak ditemukan.")
+        return
+
+    output = stop_user_service(user_id, remove_unit=True)
+    users.pop(user_id, None)
+    write_users(users)
+    try:
+        set_commands_for_chat(token, user_id, PUBLIC_COMMANDS)
+    except Exception as exc:
+        log(f"Unable to reset commands for deleted user {user_id}: {exc}")
+    detail = f"\n<code>{escape(output)}</code>" if output else ""
+    send_message(token, chat, f"User <code>{escape(user_id)}</code> dihapus.{detail}")
+
+
+def handle_users(token, chat):
+    users = read_users()
+    if not users:
+        send_message(token, chat, "Belum ada user rental.")
+        return
+
+    lines = ["<b>User rental</b>"]
+    for user_id in sorted(users, key=lambda item: int(item)):
+        lines.append(format_user_summary(user_id, users[user_id]))
+    send_message(token, chat, "\n".join(lines))
+
+
+def handle_user_set_country(token, chat, env, user_id, value):
+    try:
+        normalized = normalize_country_arg(value)
+    except ValueError as exc:
+        send_message(token, chat, str(exc))
+        return
+
+    if normalized:
+        countries, source, error = get_spider_countries(force_refresh=False)
+        if countries and normalized not in countries:
+            send_message(token, chat, f"Country <code>{escape(normalized)}</code> tidak ada di daftar Spider saat ini.")
+            return
+        if not countries and error:
+            send_message(token, chat, f"Tidak bisa validasi country dari Spider ({escape(error)}). Config tetap dicoba.")
+
+    users = read_users()
+    record = users.get(str(user_id))
+    if not is_user_active(record):
+        send_message(token, chat, "Akun Anda sudah expired atau disabled.")
+        return
+    record["country"] = normalized
+    record["updated_at"] = int(time.time())
+    ok, output = apply_user_service(env, user_id, record)
+    if ok:
+        write_users(users)
+        send_message(token, chat, f"Country proxy Anda diubah ke <code>{escape(normalized or 'default')}</code>.\n<code>{escape(output)}</code>")
+    else:
+        send_message(token, chat, f"Gagal apply proxy Anda:\n<code>{escape(output)}</code>")
+
+
+def handle_user_set_proxy(token, chat, env, user_id, value):
+    normalized = value.lower()
+    if normalized == "datacenter":
+        normalized = "isp"
+    if normalized not in PROXY_TYPES:
+        send_message(token, chat, "Pool tidak didukung. Gunakan <code>/pools</code> untuk pilihan.")
+        return
+
+    users = read_users()
+    record = users.get(str(user_id))
+    if not is_user_active(record):
+        send_message(token, chat, "Akun Anda sudah expired atau disabled.")
+        return
+    record["pool"] = normalized
+    record["updated_at"] = int(time.time())
+    ok, output = apply_user_service(env, user_id, record)
+    if ok:
+        write_users(users)
+        send_message(token, chat, f"Pool proxy Anda diubah ke <code>{escape(normalized)}</code>.\n<code>{escape(output)}</code>")
+    else:
+        send_message(token, chat, f"Gagal apply proxy Anda:\n<code>{escape(output)}</code>")
+
+
 def handle_admin_command(token, update, env, command, args):
     chat = chat_id(update)
 
@@ -1702,10 +2328,15 @@ def handle_admin_command(token, update, env, command, args):
         if not args or not args[0].isdigit():
             send_message(token, chat, "Contoh: <code>/addadmin 123456789</code>")
             return
+        admin_id = int(args[0])
         ids = parse_admin_ids(env.get("TELEGRAM_ADMIN_IDS", ""))
-        ids.add(int(args[0]))
+        ids.add(admin_id)
         env["TELEGRAM_ADMIN_IDS"] = ",".join(str(item) for item in sorted(ids))
         save_env(env)
+        try:
+            set_commands_for_chat(token, admin_id, ADMIN_COMMANDS)
+        except Exception as exc:
+            log(f"Unable to set admin commands for {admin_id}: {exc}")
         send_message(token, chat, "Admin ditambahkan.")
         return
 
@@ -1713,14 +2344,88 @@ def handle_admin_command(token, update, env, command, args):
         if not args or not args[0].isdigit():
             send_message(token, chat, "Contoh: <code>/deladmin 123456789</code>")
             return
+        admin_id = int(args[0])
         ids = parse_admin_ids(env.get("TELEGRAM_ADMIN_IDS", ""))
-        ids.discard(int(args[0]))
+        ids.discard(admin_id)
         env["TELEGRAM_ADMIN_IDS"] = ",".join(str(item) for item in sorted(ids))
         save_env(env)
+        users = read_users()
+        fallback_commands = USER_COMMANDS if is_user_active(users.get(str(admin_id))) else PUBLIC_COMMANDS
+        try:
+            set_commands_for_chat(token, admin_id, fallback_commands)
+        except Exception as exc:
+            log(f"Unable to reset admin commands for {admin_id}: {exc}")
         send_message(token, chat, "Admin dihapus.")
         return
 
+    if command == "/adduser":
+        handle_add_user(token, chat, env, args)
+        return
+
+    if command == "/deluser":
+        handle_del_user(token, chat, args)
+        return
+
+    if command == "/users":
+        handle_users(token, chat)
+        return
+
     send_message(token, chat, "Perintah tidak dikenal. Jalankan <code>/help</code>.")
+
+
+def handle_user_command(token, update, env, command, args, record):
+    chat = chat_id(update)
+    user_id = str(sender_id(update))
+    cfg = user_config_env(env, record)
+
+    if command in {"/start", "/help"}:
+        send_message(token, chat, USER_HELP_TEXT)
+        return
+
+    if command == "/status":
+        send_message(token, chat, user_status_text(env, user_id, record), proxy_copy_keyboard(cfg))
+        return
+
+    if command in {"/showproxy", "/myproxy"}:
+        proxy = proxy_line(cfg)
+        send_message(token, chat, f"<b>Proxy Anda</b>\n<code>{escape(proxy)}</code>", proxy_copy_keyboard_for_text(proxy))
+        return
+
+    if command == "/countries":
+        handle_countries(token, chat, page=0, force_refresh=False)
+        return
+
+    if command == "/refreshcountries":
+        handle_countries(token, chat, page=0, force_refresh=True)
+        return
+
+    if command == "/pools":
+        send_message(token, chat, "Pilih pool Spider untuk proxy Anda:", build_keyboard("pools"))
+        return
+
+    if command == "/setcountry":
+        if not args:
+            send_message(token, chat, "Contoh: <code>/setcountry SG</code> atau <code>/setcountry off</code>")
+            return
+        handle_user_set_country(token, chat, env, user_id, args[0])
+        return
+
+    if command == "/setproxy":
+        if not args:
+            send_message(token, chat, "Contoh: <code>/setproxy residential</code> atau <code>/setproxy default</code>")
+            return
+        handle_user_set_proxy(token, chat, env, user_id, args[0])
+        return
+
+    if command == "/test":
+        handle_test(token, chat, cfg)
+        return
+
+    if command == "/testurl":
+        handle_test_url(token, chat, cfg, args)
+        return
+
+    send_message(token, chat, "Perintah user tidak dikenal. Jalankan <code>/help</code>.")
 
 
 def handle_message(token, update):
@@ -1744,12 +2449,25 @@ def handle_message(token, update):
         claim_admin(token, update, env, args)
         return
 
-    if not require_admin_or_reply(token, update, env):
-        return
-
     try:
         send_chat_action(token, chat)
-        handle_admin_command(token, update, env, command, args)
+        if is_admin(env, update):
+            handle_admin_command(token, update, env, command, args)
+            return
+
+        users = read_users()
+        user_id = str(sender_id(update))
+        record = users.get(user_id)
+        if is_user_active(record):
+            try:
+                set_commands_for_chat(token, user_id, USER_COMMANDS)
+            except Exception as exc:
+                log(f"Unable to refresh user commands for {user_id}: {exc}")
+            handle_user_command(token, update, env, command, args, record)
+            return
+
+        reconcile_user_services(env, users, token)
+        require_admin_or_reply(token, update, env)
     except Exception as exc:
         log(f"Command {command} failed: {exc}")
         try:
@@ -1763,9 +2481,15 @@ def handle_callback(token, update):
     callback = update.get("callback_query", {})
     chat = chat_id(update)
     data = callback.get("data", "")
-
-    if not require_admin_or_reply(token, update, env):
+    user_id = str(sender_id(update))
+    users = read_users()
+    user_record = users.get(user_id)
+    admin = is_admin(env, update)
+    active_user = is_user_active(user_record)
+    if not admin and not active_user:
+        reconcile_user_services(env, users, token)
         answer_callback(token, callback.get("id", ""), "Access denied")
+        require_admin_or_reply(token, update, env)
         return
 
     try:
@@ -1788,13 +2512,19 @@ def handle_callback(token, update):
         if data.startswith("country:"):
             value = data.split(":", 1)[1]
             answer_callback(token, callback["id"], "Mengubah country...")
-            handle_set_country(token, chat, env, value)
+            if admin:
+                handle_set_country(token, chat, env, value)
+            else:
+                handle_user_set_country(token, chat, env, user_id, value)
             return
 
         if data.startswith("proxy:"):
             value = data.split(":", 1)[1]
             answer_callback(token, callback["id"], "Mengubah pool...")
-            handle_set_proxy(token, chat, env, value)
+            if admin:
+                handle_set_proxy(token, chat, env, value)
+            else:
+                handle_user_set_proxy(token, chat, env, user_id, value)
             return
 
         answer_callback(token, callback["id"], "Unknown action")
@@ -1818,13 +2548,19 @@ def main():
         return 1
 
     try:
-        set_my_commands(token)
+        set_my_commands(token, env)
     except Exception as exc:
         log(f"Unable to set Telegram commands: {exc}")
 
     offset = read_update_offset()
+    last_reconcile = 0
     while True:
         try:
+            now = int(time.time())
+            if now - last_reconcile >= 60:
+                reconcile_user_services(load_env(), token=token)
+                last_reconcile = now
+
             payload = {
                 "timeout": 30,
                 "allowed_updates": ["message", "callback_query"],

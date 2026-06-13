@@ -230,6 +230,76 @@ Command-nya:
 Jika ingin menentukan pool lagi, jalankan `/setproxy residential`,
 `/setproxy mobile`, atau pool lain dari `/pools`.
 
+## User Rental
+
+Admin bot bisa membuat proxy terpisah untuk user Telegram. Setiap user mendapat
+service GOST sendiri, port sendiri, username/password sendiri, dan setting
+country/pool sendiri. Dengan model ini, saat user A mengubah country, user B
+tidak ikut berubah.
+
+Tambah user dengan expired 30 hari:
+
+```text
+/adduser 123456789 30d country=SG pool=default
+```
+
+Format expired yang didukung:
+
+```text
+12h
+30d
+2026-07-13
+2026-07-13 23:59
+never
+```
+
+Credential dan port akan dibuat otomatis dari range `32000-32999`. Jika perlu,
+admin bisa menentukan manual:
+
+```text
+/adduser 123456789 30d user=client01 pass=secret01 port=32010 country=ID pool=residential
+```
+
+Hapus user:
+
+```text
+/deluser 123456789
+```
+
+Lihat user rental:
+
+```text
+/users
+```
+
+User rental bisa memakai command:
+
+```text
+/status
+/showproxy
+/countries
+/pools
+/setcountry SG
+/setcountry off
+/setproxy residential
+/test
+/testurl https://example.com
+```
+
+Menu command Telegram memakai scope:
+
+- user belum terdaftar hanya melihat command publik minimal seperti `/start`,
+  `/help`, `/whoami`, dan `/claim`;
+- user rental aktif melihat command user;
+- admin melihat command admin penuh.
+
+Walaupun command admin diketik manual oleh user biasa, bot tetap menolak karena
+akses dicek dari Telegram user ID di sisi bot.
+
+Saat expired, bot akan mematikan service user tersebut dalam loop cleanup
+berkala. Jika bot sedang mati saat waktu expired lewat, service akan dihentikan
+saat bot hidup kembali.
+
 ## Live Proxy Check
 
 Perintah `/status` dan `/test` melakukan request live lewat proxy lokal ke
@@ -288,14 +358,19 @@ di-copy manual dari teks `<code>...</code>`.
 /whoami
 /addadmin USER_ID
 /deladmin USER_ID
+/adduser USER_ID 30d
+/deluser USER_ID
+/users
 ```
 
 ## Service
 
 ```bash
 systemctl status spider-bridge-proxy --no-pager
+systemctl status spider-bridge-user-123456789 --no-pager
 systemctl status spider-bridge-bot --no-pager
 journalctl -u spider-bridge-proxy -f
+journalctl -u spider-bridge-user-123456789 -f
 journalctl -u spider-bridge-bot -f
 ```
 
@@ -325,10 +400,11 @@ Tanpa prompt:
 sudo spider-bridge-uninstall --yes
 ```
 
-Default uninstaller menghapus service bot, service GOST bridge, file bridge,
-config `/etc/spider-bridge`, cache `/var/lib/spider-bridge`, dan swap yang
-dibuat installer. Binary `/usr/local/bin/gost` hanya dihapus jika installer ini
-yang memasangnya.
+Default uninstaller menghapus service bot, service GOST bridge utama, semua
+service rental `spider-bridge-user-*.service`, file bridge, config
+`/etc/spider-bridge`, cache `/var/lib/spider-bridge`, dan swap yang dibuat
+installer. Binary `/usr/local/bin/gost` hanya dihapus jika installer ini yang
+memasangnya.
 
 Untuk membersihkan sisa install lama berbasis Squid, jalankan:
 
