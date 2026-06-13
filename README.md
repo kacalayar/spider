@@ -239,7 +239,7 @@ tidak ikut berubah.
 Tambah user dengan expired 30 hari:
 
 ```text
-/adduser 123456789 30d country=SG pool=default
+/adduser 123456789 30d tg=@username country=SG pool=default
 ```
 
 Format expired yang didukung:
@@ -259,6 +259,9 @@ admin bisa menentukan manual:
 /adduser 123456789 30d user=client01 pass=secret01 port=32010 country=ID pool=residential
 ```
 
+`tg=@username` opsional. Jika tidak diisi, bot akan menyimpan username dan nama
+Telegram otomatis setelah user tersebut mengirim command atau menekan tombol bot.
+
 Hapus user:
 
 ```text
@@ -271,8 +274,9 @@ Lihat user rental:
 /listuser
 ```
 
-Output list menampilkan port, username, country, pool, tanggal expired, sisa
-masa aktif, dan status active/expired.
+Output list menampilkan Telegram username/nama jika sudah diketahui, port,
+username proxy, country, pool, tanggal expired, sisa masa aktif, dan status
+active/expired.
 
 User rental bisa memakai command:
 
@@ -364,7 +368,7 @@ Command admin:
 /whoami
 /addadmin USER_ID
 /deladmin USER_ID
-/adduser USER_ID 30d
+/adduser USER_ID 30d tg=@username
 /deluser USER_ID
 /listuser
 ```

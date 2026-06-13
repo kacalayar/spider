@@ -101,7 +101,7 @@ Perintah:
 /whoami - lihat Telegram user ID
 /addadmin USER_ID - tambah admin
 /deladmin USER_ID - hapus admin
-/adduser USER_ID 30d - tambah user rental
+/adduser USER_ID 30d tg=@username - tambah user rental
 /deluser USER_ID - hapus user rental
 /listuser - lihat user rental
 """
@@ -649,6 +649,42 @@ def sender_id(update):
     if "callback_query" in update:
         return update["callback_query"].get("from", {}).get("id")
     return None
+
+
+def sender_profile(update):
+    if "message" in update:
+        user = update["message"].get("from", {})
+    elif "callback_query" in update:
+        user = update["callback_query"].get("from", {})
+    else:
+        user = {}
+
+    username = user.get("username", "")
+    first_name = user.get("first_name", "")
+    last_name = user.get("last_name", "")
+    full_name = " ".join(part for part in (first_name, last_name) if part).strip()
+    return {
+        "telegram_username": f"@{username}" if username else "",
+        "telegram_name": full_name,
+    }
+
+
+def update_user_profile_from_update(users, user_id, update):
+    record = users.get(str(user_id))
+    if not isinstance(record, dict):
+        return False
+
+    profile = sender_profile(update)
+    changed = False
+    for key in ("telegram_username", "telegram_name"):
+        value = profile.get(key, "")
+        if value and record.get(key) != value:
+            record[key] = value
+            changed = True
+
+    if changed:
+        record["updated_at"] = int(time.time())
+    return changed
 
 
 def chat_id(update):
@@ -2098,6 +2134,26 @@ def normalize_country_arg(value):
     return normalized
 
 
+def normalize_telegram_username(value):
+    username = (value or "").strip()
+    if username.lower() in {"", "-", "none", "off"}:
+        return ""
+    if username.startswith("@"):
+        username = username[1:]
+    if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+        raise ValueError("Telegram username harus 5-32 chars: A-Z a-z 0-9 _")
+    return f"@{username}"
+
+
+def normalize_telegram_name(value):
+    name = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()
+    if name.lower() in {"", "-", "none", "off"}:
+        return ""
+    if len(name) > 80:
+        raise ValueError("Nama Telegram maksimal 80 karakter.")
+    return name
+
+
 def parse_user_options(env, tokens):
     options = {
         "country": env.get("SPIDER_COUNTRY_CODE", "US"),
@@ -2106,6 +2162,8 @@ def parse_user_options(env, tokens):
         "username": "",
         "password": "",
         "port": "",
+        "telegram_username": "",
+        "telegram_name": "",
     }
 
     for token in tokens:
@@ -2137,6 +2195,10 @@ def parse_user_options(env, tokens):
             if not valid_port(value):
                 raise ValueError("Port harus angka 1-65535.")
             options["port"] = value
+        elif key in {"tg", "telegram", "telegram_username"}:
+            options["telegram_username"] = normalize_telegram_username(value)
+        elif key in {"name", "tgname", "telegram_name"}:
+            options["telegram_name"] = normalize_telegram_name(value)
         elif not key and lower_value in PROXY_TYPES:
             options["pool"] = lower_value
         elif not key and lower_value == "datacenter":
@@ -2169,9 +2231,13 @@ def validate_user_port_choice(env, users, user_id, port):
 
 def format_user_summary(user_id, record):
     state = "active" if is_user_active(record) else "expired/disabled"
+    telegram_username = record.get("telegram_username") or "-"
+    telegram_name = record.get("telegram_name") or "-"
     return "\n".join(
         [
             f"<b>User</b> <code>{escape(user_id)}</code>",
+            f"Telegram username: <code>{escape(telegram_username)}</code>",
+            f"Telegram name: <code>{escape(telegram_name)}</code>",
             f"Proxy: <code>{escape(record.get('port', ''))}:{escape(record.get('username', ''))}:{escape(record.get('password', ''))}</code>",
             f"Country: <code>{escape(record.get('country') or 'default')}</code>",
             f"Pool: <code>{escape(record.get('pool', 'residential'))}</code>",
@@ -2187,7 +2253,7 @@ def handle_add_user(token, chat, env, args):
         send_message(
             token,
             chat,
-            "Contoh: <code>/adduser 123456789 30d country=SG pool=default</code>\n"
+            "Contoh: <code>/adduser 123456789 30d tg=@username country=SG pool=default</code>\n"
             "Expired bisa <code>12h</code>, <code>30d</code>, <code>2026-07-13</code>, atau <code>never</code>.",
         )
         return
@@ -2221,6 +2287,8 @@ def handle_add_user(token, chat, env, args):
         "country": options["country"],
         "pool": options["pool"],
         "country_param": options["country_param"],
+        "telegram_username": options["telegram_username"] or existing.get("telegram_username", ""),
+        "telegram_name": options["telegram_name"] or existing.get("telegram_name", ""),
         "expires_at": expires_at,
         "enabled": True,
         "created_at": int(existing.get("created_at", now) or now),
@@ -2593,6 +2661,8 @@ def handle_message(token, update):
         user_id = str(sender_id(update))
         record = users.get(user_id)
         if is_user_active(record):
+            if update_user_profile_from_update(users, user_id, update):
+                write_users(users)
             try:
                 set_commands_for_chat(token, user_id, USER_COMMANDS)
             except Exception as exc:
@@ -2620,6 +2690,8 @@ def handle_callback(token, update):
     user_record = users.get(user_id)
     admin = is_admin(env, update)
     active_user = is_user_active(user_record)
+    if active_user and update_user_profile_from_update(users, user_id, update):
+        write_users(users)
     if not admin and not active_user:
         reconcile_user_services(env, users, token)
         answer_callback(token, callback.get("id", ""), "Access denied")
