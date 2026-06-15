@@ -143,6 +143,13 @@ stop_managed_squid() {
   systemctl disable squid >/dev/null 2>&1 || true
 }
 
+open_ufw_port() {
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -qi '^Status: active'; then
+    ufw allow "${LOCAL_PROXY_PORT}/tcp" >/dev/null || true
+    printf 'UFW allow ensured for %s/tcp\n' "$LOCAL_PROXY_PORT"
+  fi
+}
+
 write_gost_service() {
   local upstream_password="$1"
   local upstream_scheme="${SPIDER_UPSTREAM_SCHEME:-socks5}"
@@ -248,6 +255,7 @@ main() {
   systemctl daemon-reload
   systemctl enable spider-bridge-proxy.service >/dev/null
   systemctl restart spider-bridge-proxy.service
+  open_ufw_port
 
   printf 'Spider bridge applied: engine %s, local port %s, pool %s, country %s, upstream %s:%s (%s)\n' \
     "$BRIDGE_ENGINE" \

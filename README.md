@@ -336,6 +336,12 @@ test langsung ke upstream Spider. Jika direct Spider berhasil tapi jalur lokal
 gagal, cek service `spider-bridge-proxy`. Jika direct Spider juga gagal, cek API
 key, saldo/quota Spider, pool/country, atau koneksi outbound VPS ke Spider.
 
+Jika `/testurl` OK tetapi browser menampilkan `ERR_PROXY_CONNECTION_FAILED`,
+jalankan `/diag` dan lihat bagian `Local client access`. Biasanya masalahnya
+ada di listener lokal, UFW, firewall panel provider VPS, atau port yang dipakai
+browser tidak sama dengan proxy yang dikirim bot. Command `/apply` akan menulis
+ulang service GOST dan memastikan UFW mengizinkan port proxy aktif.
+
 Pesan `/status` dan `/showproxy` menyertakan tombol copy proxy. Tombol ini
 memakai fitur `copy_text` Telegram; pada client Telegram lama, proxy tetap bisa
 di-copy manual dari teks `<code>...</code>`.
@@ -362,6 +368,7 @@ Command admin:
 /diag
 /balance
 /apply
+/restartbot
 /setlocaluser USER
 /setlocalpass PASSWORD
 /setport 3128

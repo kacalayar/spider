@@ -22,6 +22,7 @@ STATE_DIR = "/var/lib/spider-bridge"
 COUNTRIES_CACHE_FILE = os.path.join(STATE_DIR, "countries.json")
 UPDATE_OFFSET_FILE = os.path.join(STATE_DIR, "telegram_update_offset")
 USERS_FILE = os.path.join(STATE_DIR, "users.json")
+BOT_SERVICE_NAME = "spider-bridge-bot"
 GOST_SERVICE_NAME = "spider-bridge-proxy"
 USER_SERVICE_PREFIX = "spider-bridge-user"
 COUNTRY_SOURCE_URL = "https://spider.cloud/proxy-locations"
@@ -95,6 +96,7 @@ Perintah:
 /diag - diagnosa bridge ke Spider upstream
 /balance - cek credit balance Spider
 /apply - tulis ulang config dan restart proxy
+/restartbot - restart service bot Telegram
 /setlocalpass PASSWORD - ubah password proxy lokal
 /setlocaluser USER - ubah user proxy lokal
 /setport 3128 - ubah port proxy lokal
@@ -848,6 +850,87 @@ def service_state(name):
         return f"unknown ({exc})"
 
 
+def proxy_listener_summary(port):
+    port = str(port)
+    try:
+        result = subprocess.run(
+            ["ss", "-H", "-ltnp"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except FileNotFoundError:
+        return "ss tidak ditemukan"
+    except Exception as exc:
+        return f"tidak bisa cek listener: {exc}"
+
+    output = (result.stdout + "\n" + result.stderr).strip()
+    if result.returncode != 0:
+        return f"ss gagal: {output[-500:] or result.returncode}"
+
+    pattern = re.compile(rf":{re.escape(port)}(?:\s|$)")
+    matches = [line.strip() for line in output.splitlines() if pattern.search(line)]
+    if not matches:
+        return f"NO_LISTENER_ON_PORT_{port}"
+    return " | ".join(matches)[:1200]
+
+
+def ufw_port_summary(port):
+    port = str(port)
+    try:
+        result = subprocess.run(
+            ["ufw", "status"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except FileNotFoundError:
+        return "ufw tidak terinstall"
+    except Exception as exc:
+        return f"tidak bisa cek ufw: {exc}"
+
+    output = (result.stdout + "\n" + result.stderr).strip()
+    if not re.search(r"^Status:\s+active", output, re.IGNORECASE | re.MULTILINE):
+        return "inactive"
+
+    pattern = re.compile(rf"(^|\s){re.escape(port)}(?:/tcp)?(\s|$)")
+    matches = [line.strip() for line in output.splitlines() if pattern.search(line)]
+    if matches:
+        return "active; " + " | ".join(matches)[:900]
+    return f"active; NO_ALLOW_RULE_FOR_{port}_TCP"
+
+
+def local_access_diagnostics(env):
+    port = env.get("LOCAL_PROXY_PORT", "3128")
+    listener = proxy_listener_summary(port)
+    ufw = ufw_port_summary(port)
+    hints = []
+
+    if "NO_LISTENER" in listener:
+        hints.append("GOST tidak listen di port ini. Jalankan /apply.")
+    elif "127.0.0.1:" in listener and "0.0.0.0:" not in listener and "[::]:" not in listener and "*:" not in listener:
+        hints.append("Listener hanya localhost. Jalankan /apply agar bind ke 0.0.0.0.")
+
+    if "NO_ALLOW_RULE" in ufw:
+        hints.append("UFW aktif tapi port belum di-allow. Jalankan /apply setelah update ini.")
+
+    if not hints:
+        hints.append("Jika browser tetap ERR_PROXY_CONNECTION_FAILED, cek firewall panel provider VPS/security group untuk port ini.")
+
+    return "\n".join(
+        [
+            "<b>Local client access</b>",
+            f"Proxy dikirim bot: <code>{escape(proxy_line(env))}</code>",
+            f"Expected bind: <code>0.0.0.0:{escape(port)}</code>",
+            f"Listener: <code>{escape(listener)}</code>",
+            f"UFW: <code>{escape(ufw)}</code>",
+            f"Hint: <code>{escape(' '.join(hints))}</code>",
+        ]
+    )
+
+
 def proxy_service_name(env):
     return GOST_SERVICE_NAME
 
@@ -887,6 +970,21 @@ def run_apply():
     if not output:
         output = f"{APPLY_CMD} exit code {result.returncode}"
     return result.returncode == 0, output[-1800:]
+
+
+def restart_bot_service():
+    try:
+        subprocess.Popen(
+            ["systemctl", "--no-block", "restart", BOT_SERVICE_NAME],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        return False, "systemctl tidak ditemukan."
+    except Exception as exc:
+        return False, f"Gagal memulai restart bot: {exc}"
+    return True, f"systemctl --no-block restart {BOT_SERVICE_NAME}"
 
 
 def proxy_line(env):
@@ -1729,6 +1827,7 @@ def diagnostic_sections(env):
     gost_tail = escape(journal_tail(GOST_SERVICE_NAME, env, max_lines=35, max_chars=1400))
     return [
         "\n".join(summary),
+        local_access_diagnostics(env),
         f"<b>GOST journal tail</b>\n<code>{gost_tail}</code>",
     ]
 
@@ -1838,6 +1937,7 @@ ADMIN_COMMANDS = [
         {"command": "diag", "description": "Diagnose bridge and Spider upstream"},
         {"command": "balance", "description": "Show Spider balance"},
         {"command": "apply", "description": "Restart proxy with current config"},
+        {"command": "restartbot", "description": "Restart Telegram bot service"},
         {"command": "whoami", "description": "Show your Telegram user ID"},
         {"command": "addadmin", "description": "Add bot admin"},
         {"command": "deladmin", "description": "Remove bot admin"},
@@ -1850,6 +1950,7 @@ ADMIN_ONLY_COMMANDS = {
     "/diag",
     "/balance",
     "/apply",
+    "/restartbot",
     "/setlocaluser",
     "/setlocalpass",
     "/setport",
@@ -2487,6 +2588,17 @@ def handle_admin_command(token, update, env, command, args):
         ok, output = run_apply()
         prefix = "Apply berhasil" if ok else "Apply gagal"
         send_message(token, chat, f"{prefix}:\n<code>{escape(output)}</code>")
+        return
+
+    if command == "/restartbot":
+        send_message(
+            token,
+            chat,
+            f"Merestart service <code>{escape(BOT_SERVICE_NAME)}</code>. Bot akan offline beberapa detik.",
+        )
+        ok, output = restart_bot_service()
+        if not ok:
+            send_message(token, chat, f"Gagal restart bot:\n<code>{escape(output)}</code>")
         return
 
     if command == "/setlocalpass":
