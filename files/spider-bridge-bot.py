@@ -1361,8 +1361,8 @@ def socks5_status_text(code):
 
 def open_spider_socks5_tunnel(env, target_host, target_port, timeout=15):
     upstream_host = env.get("SPIDER_UPSTREAM_HOST", "proxy.spider.cloud")
-    upstream_port = int(upstream_port(env))
-    sock = socket.create_connection((upstream_host, upstream_port), timeout=timeout)
+    upstream_port_number = int(upstream_port(env))
+    sock = socket.create_connection((upstream_host, upstream_port_number), timeout=timeout)
     sock.settimeout(timeout)
 
     username = env.get("SPIDER_API_KEY", "").encode("utf-8")
