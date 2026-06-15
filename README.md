@@ -342,6 +342,13 @@ ada di listener lokal, UFW, firewall panel provider VPS, atau port yang dipakai
 browser tidak sama dengan proxy yang dikirim bot. Command `/apply` akan menulis
 ulang service GOST dan memastikan UFW mengizinkan port proxy aktif.
 
+Jika memakai domain seperti `prx.example.com`, pastikan DNS `A` record mengarah
+langsung ke IP VPS, tidak memakai proxy Cloudflare/orange-cloud, dan tidak ada
+record `AAAA` yang mengarah ke server lain. Untuk memastikan cepat, coba juga
+pakai IP VPS langsung di browser: `IP_VPS:PORT:USER:PASS`. Admin bisa mengganti
+host yang dikirim bot tanpa terminal dengan `/sethost IP_VPS` atau
+`/sethost prx.example.com`.
+
 Pesan `/status` dan `/showproxy` menyertakan tombol copy proxy. Tombol ini
 memakai fitur `copy_text` Telegram; pada client Telegram lama, proxy tetap bisa
 di-copy manual dari teks `<code>...</code>`.
@@ -372,6 +379,7 @@ Command admin:
 /setlocaluser USER
 /setlocalpass PASSWORD
 /setport 3128
+/sethost HOST
 /whoami
 /addadmin USER_ID
 /deladmin USER_ID

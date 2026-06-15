@@ -100,6 +100,7 @@ Perintah:
 /setlocalpass PASSWORD - ubah password proxy lokal
 /setlocaluser USER - ubah user proxy lokal
 /setport 3128 - ubah port proxy lokal
+/sethost HOST - ubah host/domain yang dikirim bot
 /whoami - lihat Telegram user ID
 /addadmin USER_ID - tambah admin
 /deladmin USER_ID - hapus admin
@@ -743,6 +744,25 @@ def valid_test_url(value):
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def normalize_proxy_host_arg(value):
+    host = str(value or "").strip()
+    if host.lower() in {"", "-", "off", "auto", "default"}:
+        return ""
+    if "://" in host or "/" in host or ":" in host or any(char.isspace() for char in host):
+        raise ValueError("Host tidak boleh berisi scheme, slash, port, atau spasi.")
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+        raise ValueError("Host/domain tidak valid.")
+    labels = host.rstrip(".").split(".")
+    if any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") for label in labels):
+        raise ValueError("Host/domain tidak valid.")
+    return host.rstrip(".").lower()
+
+
 def default_upstream_port(scheme):
     return "8887"
 
@@ -902,10 +922,44 @@ def ufw_port_summary(port):
     return f"active; NO_ALLOW_RULE_FOR_{port}_TCP"
 
 
-def local_access_diagnostics(env):
+def proxy_host_dns_summary(host, port, expected_ip=""):
+    if not host or host == "<VPS_IP>":
+        return "not configured"
+
+    try:
+        ipaddress.ip_address(host)
+        return f"{host} (literal IP)"
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, int(port), proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        return f"unresolved: {exc}"
+    except Exception as exc:
+        return f"resolve error: {exc}"
+
+    addresses = []
+    for _family, _socktype, _proto, _canonname, sockaddr in infos:
+        address = sockaddr[0]
+        if address not in addresses:
+            addresses.append(address)
+
+    if not addresses:
+        return "unresolved: no address returned"
+
+    summary = ", ".join(addresses)
+    if expected_ip and expected_ip not in addresses:
+        summary += f" (does not include VPS IP {expected_ip})"
+    return summary
+
+
+def local_access_diagnostics(env, direct_ip=""):
     port = env.get("LOCAL_PROXY_PORT", "3128")
+    host = env.get("VPS_PUBLIC_IP") or "<VPS_IP>"
     listener = proxy_listener_summary(port)
     ufw = ufw_port_summary(port)
+    dns = proxy_host_dns_summary(host, port, direct_ip)
     hints = []
 
     if "NO_LISTENER" in listener:
@@ -916,6 +970,11 @@ def local_access_diagnostics(env):
     if "NO_ALLOW_RULE" in ufw:
         hints.append("UFW aktif tapi port belum di-allow. Jalankan /apply setelah update ini.")
 
+    if "unresolved" in dns:
+        hints.append("Domain proxy tidak resolve dari VPS. Perbaiki DNS A record atau pakai IP VPS langsung.")
+    elif "does not include VPS IP" in dns:
+        hints.append("Domain proxy resolve bukan ke IP VPS. Perbaiki DNS A record; jika pakai Cloudflare, set DNS only.")
+
     if not hints:
         hints.append("Jika browser tetap ERR_PROXY_CONNECTION_FAILED, cek firewall panel provider VPS/security group untuk port ini.")
 
@@ -924,6 +983,7 @@ def local_access_diagnostics(env):
             "<b>Local client access</b>",
             f"Proxy dikirim bot: <code>{escape(proxy_line(env))}</code>",
             f"Expected bind: <code>0.0.0.0:{escape(port)}</code>",
+            f"DNS host: <code>{escape(host)} -> {escape(dns)}</code>",
             f"Listener: <code>{escape(listener)}</code>",
             f"UFW: <code>{escape(ufw)}</code>",
             f"Hint: <code>{escape(' '.join(hints))}</code>",
@@ -1824,10 +1884,11 @@ def diagnostic_sections(env):
     else:
         summary.extend(["", "Diagnosis: <code>Proxy path OK.</code>"])
 
+    direct_ip = local_check.get("direct", {}).get("ip", "")
     gost_tail = escape(journal_tail(GOST_SERVICE_NAME, env, max_lines=35, max_chars=1400))
     return [
         "\n".join(summary),
-        local_access_diagnostics(env),
+        local_access_diagnostics(env, direct_ip),
         f"<b>GOST journal tail</b>\n<code>{gost_tail}</code>",
     ]
 
@@ -1938,6 +1999,7 @@ ADMIN_COMMANDS = [
         {"command": "balance", "description": "Show Spider balance"},
         {"command": "apply", "description": "Restart proxy with current config"},
         {"command": "restartbot", "description": "Restart Telegram bot service"},
+        {"command": "sethost", "description": "Set proxy host shown by bot"},
         {"command": "whoami", "description": "Show your Telegram user ID"},
         {"command": "addadmin", "description": "Add bot admin"},
         {"command": "deladmin", "description": "Remove bot admin"},
@@ -1954,6 +2016,7 @@ ADMIN_ONLY_COMMANDS = {
     "/setlocaluser",
     "/setlocalpass",
     "/setport",
+    "/sethost",
     "/setengine",
     "/setupstream",
     "/setcountryparam",
@@ -2632,6 +2695,28 @@ def handle_admin_command(token, update, env, command, args):
         ok, output = run_apply()
         prefix = "Port lokal diubah" if ok else "Gagal apply port lokal"
         send_message(token, chat, f"{prefix}:\n<code>{escape(output)}</code>")
+        return
+
+    if command == "/sethost":
+        if not args:
+            send_message(token, chat, "Contoh: <code>/sethost 74.113.234.49</code> atau <code>/sethost prx.meki.dev</code>")
+            return
+        try:
+            host = normalize_proxy_host_arg(args[0])
+        except ValueError as exc:
+            send_message(token, chat, f"Host tidak valid: <code>{escape(exc)}</code>")
+            return
+        env["VPS_PUBLIC_IP"] = host
+        save_env(env)
+        shown = host or "<VPS_IP>"
+        send_message(
+            token,
+            chat,
+            f"Host proxy yang dikirim bot diubah ke <code>{escape(shown)}</code>.\n"
+            f"Proxy: <code>{escape(proxy_line(env))}</code>\n\n"
+            "Catatan: ini hanya mengubah host yang ditampilkan bot, bukan service GOST.",
+            proxy_copy_keyboard(env),
+        )
         return
 
     if command == "/addadmin":
