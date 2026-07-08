@@ -180,7 +180,8 @@ menyimpan cache di:
 ```
 
 Cache dipakai 24 jam. Gunakan `/refreshcountries` untuk mengambil ulang daftar
-country dari Spider.
+country dari Spider. Tombol country menampilkan flag dan nama negara, tetapi value
+yang dipilih tetap ISO 2 huruf.
 
 ## Country Parameter
 

@@ -192,13 +192,39 @@ def read_countries_cache():
     return valid, fetched_at
 
 
-def write_countries_cache(countries):
+def read_country_names_cache():
+    if not os.path.exists(COUNTRIES_CACHE_FILE):
+        return {}
+
+    try:
+        with open(COUNTRIES_CACHE_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    names = payload.get("country_names", {})
+    if not isinstance(names, dict):
+        return {}
+    return {
+        code.upper(): str(name).strip()
+        for code, name in names.items()
+        if valid_country(str(code).upper()) and str(name).strip()
+    }
+
+
+def write_countries_cache(countries, country_names=None):
     os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
     payload = {
         "source": COUNTRY_SOURCE_URL,
         "fetched_at": int(time.time()),
         "countries": countries,
     }
+    if country_names:
+        payload["country_names"] = {
+            code: country_names[code]
+            for code in countries
+            if code in country_names
+        }
     tmp_path = COUNTRIES_CACHE_FILE + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
@@ -508,6 +534,37 @@ def reconcile_user_services(env, users=None, token=None):
         write_users(users)
 
 
+def clean_country_name(code, value):
+    text = html.unescape(re.sub(r"<[^>]+>", " ", value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(rf"^{re.escape(code)}\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub("\\s*(?:->|\\u2192)\\s*$", "", text)
+    text = re.sub(r"\s+\d+(?:\.\d+)?\s*[KMB]?(?:\s+IPs?)?$", "", text, flags=re.IGNORECASE).strip()
+    return text if text and not valid_country(text.upper()) else ""
+
+
+def extract_country_names(body):
+    names = {}
+    for match in re.finditer(r"<a\b[^>]*\bcountry=([a-z]{2})\b[^>]*>(.*?)</a>", body, re.IGNORECASE | re.DOTALL):
+        code = match.group(1).upper()
+        name = clean_country_name(code, match.group(2))
+        if name:
+            names[code] = name
+    return names
+
+
+def country_flag(country):
+    country = (country or "").upper()
+    if not valid_country(country):
+        return ""
+    return "".join(chr(0x1F1E6 + ord(char) - ord("A")) for char in country)
+
+
+def country_button_text(country, country_names=None):
+    name = (country_names or {}).get(country, "")
+    return f"{country_flag(country)} {country} {name}".strip()
+
+
 def fetch_spider_countries():
     request = urllib.request.Request(
         COUNTRY_SOURCE_URL,
@@ -516,11 +573,15 @@ def fetch_spider_countries():
     with urllib.request.urlopen(request, timeout=25) as response:
         body = response.read().decode("utf-8", errors="replace")
 
-    countries = sorted({match.group(1).upper() for match in re.finditer(r"\bcountry=([a-z]{2})\b", body)})
+    country_names = extract_country_names(body)
+    countries = sorted(
+        set(country_names)
+        | {match.group(1).upper() for match in re.finditer(r"\bcountry=([a-z]{2})\b", body)}
+    )
     if len(countries) < 20:
         raise RuntimeError(f"Spider locations parse returned only {len(countries)} countries")
 
-    write_countries_cache(countries)
+    write_countries_cache(countries, country_names)
     return countries
 
 
@@ -834,18 +895,18 @@ def build_keyboard(kind):
     return None
 
 
-def build_countries_keyboard(countries, page):
+def build_countries_keyboard(countries, page, country_names=None):
     page_count = max(1, (len(countries) + COUNTRY_PAGE_SIZE - 1) // COUNTRY_PAGE_SIZE)
     page = max(0, min(page, page_count - 1))
     start = page * COUNTRY_PAGE_SIZE
     visible = countries[start : start + COUNTRY_PAGE_SIZE]
 
     rows = []
-    for index in range(0, len(visible), 5):
+    for index in range(0, len(visible), 2):
         rows.append(
             [
-                {"text": country, "callback_data": f"country:{country}"}
-                for country in visible[index : index + 5]
+                {"text": country_button_text(country, country_names), "callback_data": f"country:{country}"}
+                for country in visible[index : index + 2]
             ]
         )
 
@@ -2322,8 +2383,15 @@ def handle_countries(token, chat, page=0, force_refresh=False, edit_message_id=N
             send_message(token, chat, text)
         return
 
+    country_names = read_country_names_cache()
+    if not country_names and not force_refresh and source == "cache":
+        refreshed, refreshed_source, refreshed_error = get_spider_countries(force_refresh=True)
+        if refreshed:
+            countries, source, error = refreshed, refreshed_source, refreshed_error
+            country_names = read_country_names_cache()
+
     text = countries_text(countries, source, error)
-    keyboard = build_countries_keyboard(countries, page)
+    keyboard = build_countries_keyboard(countries, page, country_names)
     if edit_message_id:
         edit_message(token, chat, edit_message_id, text, keyboard)
     else:
