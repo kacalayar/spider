@@ -89,6 +89,7 @@ Perintah:
 /setcountry off - pakai default Spider
 /setusercountry SG - default country user baru
 /setusercountry off - default Spider untuk user baru
+/setusercountry USER_ID SG - ubah country user rental
 /setcountryparam country_code - pilih parameter country_code atau country
 /setproxy residential - ubah pool Spider, pakai default untuk tanpa proxy=...
 /setengine gost - pastikan engine GOST
@@ -1991,7 +1992,7 @@ ADMIN_COMMANDS = [
         {"command": "refreshcountries", "description": "Refresh Spider locations"},
         {"command": "pools", "description": "Choose Spider proxy pool"},
         {"command": "setcountry", "description": "Set country code"},
-        {"command": "setusercountry", "description": "Set default country for new users"},
+        {"command": "setusercountry", "description": "Set default/user country"},
         {"command": "setcountryparam", "description": "Set country or country_code param"},
         {"command": "setproxy", "description": "Set Spider pool"},
         {"command": "setengine", "description": "Ensure GOST engine"},
@@ -2571,7 +2572,7 @@ def handle_users(token, chat):
     send_message(token, chat, "\n".join(lines))
 
 
-def handle_user_set_country(token, chat, env, user_id, value):
+def handle_user_set_country(token, chat, env, user_id, value, admin=False):
     try:
         normalized = normalize_country_arg(value)
     except ValueError as exc:
@@ -2587,18 +2588,26 @@ def handle_user_set_country(token, chat, env, user_id, value):
             send_message(token, chat, f"Tidak bisa validasi country dari Spider ({escape(error)}). Config tetap dicoba.")
 
     users = read_users()
-    record = users.get(str(user_id))
+    user_id = str(user_id)
+    record = users.get(user_id)
     if not is_user_active(record):
-        send_message(token, chat, "Akun Anda sudah expired atau disabled.")
+        if admin:
+            send_message(token, chat, f"User <code>{escape(user_id)}</code> tidak ditemukan, expired, atau disabled.")
+        else:
+            send_message(token, chat, "Akun Anda sudah expired atau disabled.")
         return
     record["country"] = normalized
     record["updated_at"] = int(time.time())
     ok, output = apply_user_service(env, user_id, record)
     if ok:
         write_users(users)
-        send_message(token, chat, f"Country proxy Anda diubah ke <code>{escape(normalized or 'default')}</code>.\n<code>{escape(output)}</code>")
+        if admin:
+            send_message(token, chat, f"Country user <code>{escape(user_id)}</code> diubah ke <code>{escape(normalized or 'default')}</code>.\n<code>{escape(output)}</code>")
+        else:
+            send_message(token, chat, f"Country proxy Anda diubah ke <code>{escape(normalized or 'default')}</code>.\n<code>{escape(output)}</code>")
     else:
-        send_message(token, chat, f"Gagal apply proxy Anda:\n<code>{escape(output)}</code>")
+        target = f"user <code>{escape(user_id)}</code>" if admin else "proxy Anda"
+        send_message(token, chat, f"Gagal apply {target}:\n<code>{escape(output)}</code>")
 
 
 def handle_user_set_proxy(token, chat, env, user_id, value):
@@ -2656,9 +2665,12 @@ def handle_admin_command(token, update, env, command, args):
 
     if command == "/setusercountry":
         if not args:
-            send_message(token, chat, "Contoh: <code>/setusercountry SG</code> atau <code>/setusercountry off</code>")
+            send_message(token, chat, "Contoh: <code>/setusercountry SG</code> atau <code>/setusercountry 123456789 SG</code>")
             return
-        handle_set_user_country(token, chat, env, args[0])
+        if len(args) >= 2 and args[0].isdigit():
+            handle_user_set_country(token, chat, env, str(int(args[0])), args[1], admin=True)
+        else:
+            handle_set_user_country(token, chat, env, args[0])
         return
 
     if command == "/setcountryparam":

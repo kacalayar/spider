@@ -246,6 +246,12 @@ proxy utama admin:
 /setusercountry off
 ```
 
+Admin juga bisa mengubah country user rental tertentu:
+
+```text
+/setusercountry 123456789 ID
+```
+
 Jika `country=...` tidak diisi saat `/adduser`, bot memakai default dari
 `/setusercountry`. Jika default user belum pernah diset, bot tetap fallback ke
 country proxy utama untuk kompatibilitas install lama.
@@ -380,6 +386,7 @@ Command admin:
 /setcountry off
 /setusercountry SG
 /setusercountry off
+/setusercountry USER_ID ID
 /setproxy residential
 /setproxy default
 /setcountryparam country_code
