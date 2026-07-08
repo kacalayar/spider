@@ -880,13 +880,14 @@ def spider_auth_header(env):
     return "Basic " + base64.b64encode(raw).decode("ascii")
 
 
-def build_keyboard(kind):
+def build_keyboard(kind, target="main"):
     if kind == "pools":
+        prefix = "userproxy" if target == "user" else "proxy"
         rows = []
         for index in range(0, len(PROXY_TYPES), 2):
             rows.append(
                 [
-                    {"text": pool, "callback_data": f"proxy:{pool}"}
+                    {"text": pool, "callback_data": f"{prefix}:{pool}"}
                     for pool in PROXY_TYPES[index : index + 2]
                 ]
             )
@@ -895,29 +896,30 @@ def build_keyboard(kind):
     return None
 
 
-def build_countries_keyboard(countries, page, country_names=None):
+def build_countries_keyboard(countries, page, country_names=None, target="main"):
     page_count = max(1, (len(countries) + COUNTRY_PAGE_SIZE - 1) // COUNTRY_PAGE_SIZE)
     page = max(0, min(page, page_count - 1))
     start = page * COUNTRY_PAGE_SIZE
     visible = countries[start : start + COUNTRY_PAGE_SIZE]
+    prefix = "usercountry" if target == "user" else "country"
 
     rows = []
     for index in range(0, len(visible), 2):
         rows.append(
             [
-                {"text": country_button_text(country, country_names), "callback_data": f"country:{country}"}
+                {"text": country_button_text(country, country_names), "callback_data": f"{prefix}:{country}"}
                 for country in visible[index : index + 2]
             ]
         )
 
     nav = []
     if page > 0:
-        nav.append({"text": "Prev", "callback_data": f"countries:{page - 1}"})
-    nav.append({"text": f"{page + 1}/{page_count}", "callback_data": f"noop:countries:{page}"})
+        nav.append({"text": "Prev", "callback_data": f"countries:{target}:{page - 1}"})
+    nav.append({"text": f"{page + 1}/{page_count}", "callback_data": f"noop:countries:{target}:{page}"})
     if page + 1 < page_count:
-        nav.append({"text": "Next", "callback_data": f"countries:{page + 1}"})
+        nav.append({"text": "Next", "callback_data": f"countries:{target}:{page + 1}"})
     rows.append(nav)
-    rows.append([{"text": "Default Spider", "callback_data": "country:"}])
+    rows.append([{"text": "Default Spider", "callback_data": f"{prefix}:"}])
     return {"inline_keyboard": rows}
 
 
@@ -2370,7 +2372,7 @@ def countries_text(countries, source, error):
     return note
 
 
-def handle_countries(token, chat, page=0, force_refresh=False, edit_message_id=None):
+def handle_countries(token, chat, page=0, force_refresh=False, edit_message_id=None, target="main"):
     countries, source, error = get_spider_countries(force_refresh=force_refresh)
     if not countries:
         text = (
@@ -2391,7 +2393,7 @@ def handle_countries(token, chat, page=0, force_refresh=False, edit_message_id=N
             country_names = read_country_names_cache()
 
     text = countries_text(countries, source, error)
-    keyboard = build_countries_keyboard(countries, page, country_names)
+    keyboard = build_countries_keyboard(countries, page, country_names, target)
     if edit_message_id:
         edit_message(token, chat, edit_message_id, text, keyboard)
     else:
@@ -2928,15 +2930,15 @@ def handle_user_command(token, update, env, command, args, record):
         return
 
     if command == "/countries":
-        handle_countries(token, chat, page=0, force_refresh=False)
+        handle_countries(token, chat, page=0, force_refresh=False, target="user")
         return
 
     if command == "/refreshcountries":
-        handle_countries(token, chat, page=0, force_refresh=True)
+        handle_countries(token, chat, page=0, force_refresh=True, target="user")
         return
 
     if command == "/pools":
-        send_message(token, chat, "Pilih pool Spider untuk proxy Anda:", build_keyboard("pools"))
+        send_message(token, chat, "Pilih pool Spider untuk proxy Anda:", build_keyboard("pools", target="user"))
         return
 
     if command == "/setcountry":
@@ -3042,7 +3044,13 @@ def handle_callback(token, update):
             return
 
         if data.startswith("countries:"):
-            page = int(data.split(":", 1)[1])
+            parts = data.split(":")
+            if len(parts) >= 3:
+                target = parts[1] if parts[1] in {"main", "user"} else "main"
+                page = int(parts[2])
+            else:
+                target = "main"
+                page = int(parts[1])
             answer_callback(token, callback["id"], "Membuka halaman country...")
             handle_countries(
                 token,
@@ -3050,7 +3058,17 @@ def handle_callback(token, update):
                 page=page,
                 force_refresh=False,
                 edit_message_id=callback_message_id(update),
+                target=target,
             )
+            return
+
+        if data.startswith("usercountry:"):
+            value = data.split(":", 1)[1]
+            answer_callback(token, callback["id"], "Mengubah country user...")
+            if active_user:
+                handle_user_set_country(token, chat, env, user_id, value)
+            else:
+                send_message(token, chat, "Akun user Anda tidak aktif.")
             return
 
         if data.startswith("country:"):
@@ -3060,6 +3078,15 @@ def handle_callback(token, update):
                 handle_set_country(token, chat, env, value)
             else:
                 handle_user_set_country(token, chat, env, user_id, value)
+            return
+
+        if data.startswith("userproxy:"):
+            value = data.split(":", 1)[1]
+            answer_callback(token, callback["id"], "Mengubah pool user...")
+            if active_user:
+                handle_user_set_proxy(token, chat, env, user_id, value)
+            else:
+                send_message(token, chat, "Akun user Anda tidak aktif.")
             return
 
         if data.startswith("proxy:"):
