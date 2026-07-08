@@ -50,6 +50,7 @@ sudo bash /tmp/spider-bridge-install.sh \
   --port 3128 \
   --swap-size-gb 2 \
   --country ID \
+  --user-default-country SG \
   --pool residential
 ```
 
@@ -81,6 +82,7 @@ sudo bash install.sh \
   --port 3128 \
   --swap-size-gb 2 \
   --country ID \
+  --user-default-country SG \
   --pool residential
 ```
 
@@ -236,6 +238,18 @@ service GOST sendiri, port sendiri, username/password sendiri, dan setting
 country/pool sendiri. Dengan model ini, saat user A mengubah country, user B
 tidak ikut berubah.
 
+Admin bisa menentukan default country untuk user baru tanpa mengubah country
+proxy utama admin:
+
+```text
+/setusercountry SG
+/setusercountry off
+```
+
+Jika `country=...` tidak diisi saat `/adduser`, bot memakai default dari
+`/setusercountry`. Jika default user belum pernah diset, bot tetap fallback ke
+country proxy utama untuk kompatibilitas install lama.
+
 Tambah user dengan expired 30 hari:
 
 ```text
@@ -364,6 +378,8 @@ Command admin:
 /pools
 /setcountry ID
 /setcountry off
+/setusercountry SG
+/setusercountry off
 /setproxy residential
 /setproxy default
 /setcountryparam country_code

@@ -63,6 +63,7 @@ ENV_KEYS = [
     "SPIDER_API_KEY",
     "SPIDER_PROXY_TYPE",
     "SPIDER_COUNTRY_CODE",
+    "USER_DEFAULT_COUNTRY_CODE",
     "SPIDER_COUNTRY_PARAM",
     "SPIDER_EXTRA_PARAMS",
     "SPIDER_UPSTREAM_SCHEME",
@@ -86,6 +87,8 @@ Perintah:
 /pools - pilih pool Spider dengan tombol
 /setcountry US - ubah lokasi, contoh US atau ID
 /setcountry off - pakai default Spider
+/setusercountry SG - default country user baru
+/setusercountry off - default Spider untuk user baru
 /setcountryparam country_code - pilih parameter country_code atau country
 /setproxy residential - ubah pool Spider, pakai default untuk tanpa proxy=...
 /setengine gost - pastikan engine GOST
@@ -1988,6 +1991,7 @@ ADMIN_COMMANDS = [
         {"command": "refreshcountries", "description": "Refresh Spider locations"},
         {"command": "pools", "description": "Choose Spider proxy pool"},
         {"command": "setcountry", "description": "Set country code"},
+        {"command": "setusercountry", "description": "Set default country for new users"},
         {"command": "setcountryparam", "description": "Set country or country_code param"},
         {"command": "setproxy", "description": "Set Spider pool"},
         {"command": "setengine", "description": "Ensure GOST engine"},
@@ -2019,6 +2023,7 @@ ADMIN_ONLY_COMMANDS = {
     "/sethost",
     "/setengine",
     "/setupstream",
+    "/setusercountry",
     "/setcountryparam",
     "/addadmin",
     "/deladmin",
@@ -2129,6 +2134,41 @@ def handle_set_country(token, chat, env, value):
         send_message(token, chat, f"Country diubah ke <code>{escape(normalized or 'default')}</code>.\n<code>{escape(output)}</code>")
     else:
         send_message(token, chat, f"Gagal apply config:\n<code>{escape(output)}</code>")
+
+
+def handle_set_user_country(token, chat, env, value):
+    try:
+        normalized = normalize_country_arg(value)
+    except ValueError as exc:
+        send_message(token, chat, str(exc))
+        return
+
+    if normalized:
+        countries, source, error = get_spider_countries(force_refresh=False)
+        if countries and normalized not in countries:
+            send_message(
+                token,
+                chat,
+                f"Country <code>{escape(normalized)}</code> tidak ada di daftar Spider saat ini. "
+                f"Jalankan <code>/refreshcountries</code> atau cek kode country-nya.",
+            )
+            return
+        if not countries and error:
+            send_message(
+                token,
+                chat,
+                f"Tidak bisa validasi daftar country dari Spider ({escape(error)}). Config tetap disimpan.",
+            )
+
+    env["USER_DEFAULT_COUNTRY_CODE"] = normalized
+    save_env(env)
+    send_message(
+        token,
+        chat,
+        "Default country user baru diubah ke "
+        f"<code>{escape(normalized or 'default Spider')}</code>.\n"
+        "User yang sudah ada tidak berubah.",
+    )
 
 
 def handle_set_country_param(token, chat, env, value):
@@ -2320,7 +2360,7 @@ def normalize_telegram_name(value):
 
 def parse_user_options(env, tokens):
     options = {
-        "country": env.get("SPIDER_COUNTRY_CODE", "US"),
+        "country": env.get("USER_DEFAULT_COUNTRY_CODE", env.get("SPIDER_COUNTRY_CODE", "US")),
         "pool": env.get("SPIDER_PROXY_TYPE", "residential"),
         "country_param": env.get("SPIDER_COUNTRY_PARAM", "country_code"),
         "username": "",
@@ -2426,7 +2466,8 @@ def handle_add_user(token, chat, env, args):
             token,
             chat,
             "Contoh: <code>/adduser 123456789 30d tg=@username country=SG pool=default</code>\n"
-            "Expired bisa <code>12h</code>, <code>30d</code>, <code>2026-07-13</code>, atau <code>never</code>.",
+            "Expired bisa <code>12h</code>, <code>30d</code>, <code>2026-07-13</code>, atau <code>never</code>.\n"
+            "Jika <code>country=</code> tidak diisi, default memakai <code>/setusercountry</code>.",
         )
         return
 
@@ -2611,6 +2652,13 @@ def handle_admin_command(token, update, env, command, args):
             send_message(token, chat, "Contoh: <code>/setcountry US</code> atau <code>/setcountry off</code>")
             return
         handle_set_country(token, chat, env, args[0])
+        return
+
+    if command == "/setusercountry":
+        if not args:
+            send_message(token, chat, "Contoh: <code>/setusercountry SG</code> atau <code>/setusercountry off</code>")
+            return
+        handle_set_user_country(token, chat, env, args[0])
         return
 
     if command == "/setcountryparam":

@@ -50,6 +50,7 @@ Options:
   --port VALUE                 Local proxy port, default: 3128
   --bridge-engine VALUE        Bridge engine, only gost is supported
   --country VALUE              Spider country code, default: US, use off for default
+  --user-default-country VALUE Default country for new rental users, use off for Spider default
   --country-param VALUE        Spider country parameter: country_code or country, default: country_code
   --pool VALUE                 Spider proxy pool, default: residential, use default to omit proxy=...
   --vps-public-ip VALUE        Public IP shown by /showproxy, default: auto-detect
@@ -131,7 +132,7 @@ load_existing_config_defaults() {
   while IFS='=' read -r key value || [[ -n "$key" ]]; do
     [[ -n "$key" && "$key" != \#* ]] || continue
     case "$key" in
-      BRIDGE_ENGINE|SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_SCHEME|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT|VPS_PUBLIC_IP|TELEGRAM_BOT_TOKEN|TELEGRAM_ADMIN_IDS)
+      BRIDGE_ENGINE|SPIDER_API_KEY|SPIDER_PROXY_TYPE|SPIDER_COUNTRY_CODE|USER_DEFAULT_COUNTRY_CODE|SPIDER_COUNTRY_PARAM|SPIDER_EXTRA_PARAMS|SPIDER_UPSTREAM_SCHEME|SPIDER_UPSTREAM_HOST|SPIDER_UPSTREAM_PORT|LOCAL_PROXY_USER|LOCAL_PROXY_PASS|LOCAL_PROXY_PORT|VPS_PUBLIC_IP|TELEGRAM_BOT_TOKEN|TELEGRAM_ADMIN_IDS)
         if [[ -z "${!key:-}" ]]; then
           printf -v "$key" '%s' "$value"
         fi
@@ -282,6 +283,10 @@ parse_args() {
         SPIDER_COUNTRY_CODE="$2"
         shift 2
         ;;
+      --user-default-country)
+        USER_DEFAULT_COUNTRY_CODE="$2"
+        shift 2
+        ;;
       --country-param)
         SPIDER_COUNTRY_PARAM="$2"
         shift 2
@@ -351,11 +356,16 @@ normalize_values() {
   BRIDGE_ENGINE="${BRIDGE_ENGINE,,}"
   SPIDER_PROXY_TYPE="${SPIDER_PROXY_TYPE,,}"
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE^^}"
+  USER_DEFAULT_COUNTRY_CODE="${USER_DEFAULT_COUNTRY_CODE^^}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM,,}"
   SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME,,}"
 
   case "$SPIDER_COUNTRY_CODE" in
     OFF|DEFAULT|NONE|-) SPIDER_COUNTRY_CODE="" ;;
+  esac
+
+  case "$USER_DEFAULT_COUNTRY_CODE" in
+    OFF|DEFAULT|NONE|-) USER_DEFAULT_COUNTRY_CODE="" ;;
   esac
 }
 
@@ -368,6 +378,7 @@ validate_values() {
   validate_bridge_engine "$BRIDGE_ENGINE"
   validate_proxy_type "$SPIDER_PROXY_TYPE"
   validate_country "$SPIDER_COUNTRY_CODE"
+  validate_country "$USER_DEFAULT_COUNTRY_CODE"
   validate_country_param "$SPIDER_COUNTRY_PARAM"
   validate_upstream_scheme "$SPIDER_UPSTREAM_SCHEME"
   validate_engine_upstream_pair
@@ -550,6 +561,7 @@ BRIDGE_ENGINE=${BRIDGE_ENGINE}
 SPIDER_API_KEY=${SPIDER_API_KEY}
 SPIDER_PROXY_TYPE=${SPIDER_PROXY_TYPE}
 SPIDER_COUNTRY_CODE=${SPIDER_COUNTRY_CODE}
+USER_DEFAULT_COUNTRY_CODE=${USER_DEFAULT_COUNTRY_CODE}
 SPIDER_COUNTRY_PARAM=${SPIDER_COUNTRY_PARAM}
 SPIDER_EXTRA_PARAMS=${SPIDER_EXTRA_PARAMS}
 SPIDER_UPSTREAM_SCHEME=${SPIDER_UPSTREAM_SCHEME}
@@ -668,6 +680,7 @@ main() {
   BRIDGE_ENGINE="${BRIDGE_ENGINE:-gost}"
   SPIDER_PROXY_TYPE="${SPIDER_PROXY_TYPE:-}"
   SPIDER_COUNTRY_CODE="${SPIDER_COUNTRY_CODE:-}"
+  USER_DEFAULT_COUNTRY_CODE="${USER_DEFAULT_COUNTRY_CODE:-}"
   SPIDER_COUNTRY_PARAM="${SPIDER_COUNTRY_PARAM:-country_code}"
   SPIDER_EXTRA_PARAMS="${SPIDER_EXTRA_PARAMS:-}"
   SPIDER_UPSTREAM_SCHEME="${SPIDER_UPSTREAM_SCHEME:-}"
