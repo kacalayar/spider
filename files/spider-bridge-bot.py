@@ -2393,6 +2393,14 @@ def validate_user_port_choice(env, users, user_id, port):
         raise ValueError(f"Port {port} sedang dipakai service lain.")
 
 
+def validate_main_port_choice(env, users, port):
+    for user_id, record in users.items():
+        if str(record.get("port", "")) == str(port):
+            raise ValueError(f"Port sudah dipakai user {user_id}.")
+    if str(port) != str(env.get("LOCAL_PROXY_PORT", "3128")) and not port_available(port):
+        raise ValueError(f"Port {port} sedang dipakai service lain.")
+
+
 def format_user_summary(user_id, record):
     state = "active" if is_user_active(record) else "expired/disabled"
     telegram_username = record.get("telegram_username") or "-"
@@ -2689,6 +2697,11 @@ def handle_admin_command(token, update, env, command, args):
     if command == "/setport":
         if not args or not valid_port(args[0]):
             send_message(token, chat, "Port harus angka 1-65535.")
+            return
+        try:
+            validate_main_port_choice(env, read_users(), args[0])
+        except ValueError as exc:
+            send_message(token, chat, f"Tidak bisa ubah port utama: <code>{escape(exc)}</code>")
             return
         env["LOCAL_PROXY_PORT"] = args[0]
         save_env(env)
