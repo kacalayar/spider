@@ -534,7 +534,11 @@ download_repo_file() {
   local base_url="${REPO_RAW_URL%/}"
 
   log "Downloading ${repo_path} from ${base_url}"
-  curl -fsSL "${base_url}/${repo_path}" -o "$destination"
+  if ! curl -fsSL "${base_url}/${repo_path}" -o "$destination"; then
+    rm -f -- "$destination"
+    die "Failed to download ${base_url}/${repo_path}. GitHub may be rate-limiting this VPS; retry later, run installer from a cloned repo, or set --repo-raw-url to another mirror/branch."
+  fi
+  [[ -s "$destination" ]] || die "Downloaded ${base_url}/${repo_path} is empty"
 }
 
 resolve_source_file() {
