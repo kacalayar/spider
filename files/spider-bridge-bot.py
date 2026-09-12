@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import html
 import ipaddress
@@ -11,6 +12,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -45,6 +47,10 @@ HTTP_IP_CHECK_URLS = [
 FRAUD_CHECK_URL_TEMPLATE = "https://proxycheck.io/v2/{ip}?risk=1&vpn=1&asn=1&node=1&time=1"
 SPIDER_CREDITS_URL = "https://api.spider.cloud/data/credits"
 TELEGRAM_SAFE_TEXT_LIMIT = 3500
+UPDATE_WORKER_COUNT = max(4, min(16, (os.cpu_count() or 4) * 2))
+UPDATE_LOCKS = {}
+UPDATE_LOCKS_GUARD = threading.Lock()
+STATE_LOCK = threading.RLock()
 
 PROXY_TYPES = [
     "default",
@@ -133,6 +139,31 @@ def log(message):
     print(message, flush=True)
 
 
+def handle_update_job(token, update):
+    """Process one Telegram update outside the long-polling thread."""
+    update_chat = update.get("message", {}).get("chat", {}).get("id")
+    if update_chat is None:
+        update_chat = update.get("callback_query", {}).get("message", {}).get("chat", {}).get("id")
+    lock_key = str(update_chat or "unknown")
+    with UPDATE_LOCKS_GUARD:
+        update_lock = UPDATE_LOCKS.setdefault(lock_key, threading.Lock())
+
+    try:
+        with update_lock:
+            handle_update(token, update)
+    except Exception as exc:
+        update_id = update.get("update_id", "unknown")
+        log(f"Update {update_id} handling failed: {exc}")
+
+
+def reconcile_job(token):
+    """Run periodic service cleanup without blocking Telegram polling."""
+    try:
+        reconcile_user_services(load_env(), token=token)
+    except Exception as exc:
+        log(f"Background service reconciliation failed: {exc}")
+
+
 def escape(value):
     return html.escape(str(value), quote=False)
 
@@ -153,21 +184,22 @@ def load_env():
 
 
 def save_env(data):
-    tmp_path = ENV_FILE + ".tmp"
-    lines = []
+    with STATE_LOCK:
+        tmp_path = ENV_FILE + ".tmp"
+        lines = []
 
-    for key in ENV_KEYS:
-        if key in data:
+        for key in ENV_KEYS:
+            if key in data:
+                lines.append(f"{key}={data[key]}\n")
+
+        for key in sorted(set(data) - set(ENV_KEYS)):
             lines.append(f"{key}={data[key]}\n")
 
-    for key in sorted(set(data) - set(ENV_KEYS)):
-        lines.append(f"{key}={data[key]}\n")
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.writelines(lines)
 
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        handle.writelines(lines)
-
-    os.chmod(tmp_path, 0o600)
-    os.replace(tmp_path, ENV_FILE)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, ENV_FILE)
 
 
 def read_countries_cache():
@@ -246,12 +278,13 @@ def read_update_offset():
 
 
 def write_update_offset(offset):
-    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
-    tmp_path = UPDATE_OFFSET_FILE + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        handle.write(f"{int(offset)}\n")
-    os.chmod(tmp_path, 0o644)
-    os.replace(tmp_path, UPDATE_OFFSET_FILE)
+    with STATE_LOCK:
+        os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+        tmp_path = UPDATE_OFFSET_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(f"{int(offset)}\n")
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, UPDATE_OFFSET_FILE)
 
 
 def read_users():
@@ -276,18 +309,19 @@ def read_users():
 
 
 def write_users(users):
-    os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
-    payload = {
-        "version": 1,
-        "updated_at": int(time.time()),
-        "users": users,
-    }
-    tmp_path = USERS_FILE + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.chmod(tmp_path, 0o600)
-    os.replace(tmp_path, USERS_FILE)
+    with STATE_LOCK:
+        os.makedirs(STATE_DIR, mode=0o755, exist_ok=True)
+        payload = {
+            "version": 1,
+            "updated_at": int(time.time()),
+            "users": users,
+        }
+        tmp_path = USERS_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, USERS_FILE)
 
 
 def format_expiry(expires_at):
@@ -2711,6 +2745,7 @@ def handle_admin_command(token, update, env, command, args):
         return
 
     if command == "/status":
+        send_message(token, chat, "⏳ Mengambil status proxy dan koneksi Spider...")
         send_message(token, chat, status_text(env), proxy_copy_keyboard(env))
         return
 
@@ -2770,22 +2805,27 @@ def handle_admin_command(token, update, env, command, args):
         return
 
     if command == "/test":
+        send_message(token, chat, "⏳ Menjalankan test proxy...")
         handle_test(token, chat, env)
         return
 
     if command == "/testurl":
+        send_message(token, chat, "⏳ Menjalankan test URL melalui proxy...")
         handle_test_url(token, chat, env, args)
         return
 
     if command == "/diag":
+        send_message(token, chat, "⏳ Menjalankan diagnosa bridge dan Spider...")
         handle_diag(token, chat, env)
         return
 
     if command == "/balance":
+        send_message(token, chat, "⏳ Mengecek saldo Spider...")
         send_message(token, chat, f"<b>Spider Balance</b>\n{format_spider_credits(fetch_spider_credits(env))}")
         return
 
     if command == "/apply":
+        send_message(token, chat, "⏳ Menerapkan konfigurasi dan merestart proxy...")
         ok, output = run_apply()
         prefix = "Apply berhasil" if ok else "Apply gagal"
         send_message(token, chat, f"{prefix}:\n<code>{escape(output)}</code>")
@@ -2921,6 +2961,7 @@ def handle_user_command(token, update, env, command, args, record):
         return
 
     if command == "/status":
+        send_message(token, chat, "⏳ Mengambil status proxy Anda...")
         send_message(token, chat, user_status_text(env, user_id, record), proxy_copy_keyboard(cfg))
         return
 
@@ -2956,10 +2997,12 @@ def handle_user_command(token, update, env, command, args, record):
         return
 
     if command == "/test":
+        send_message(token, chat, "⏳ Menjalankan test proxy Anda...")
         handle_test(token, chat, cfg)
         return
 
     if command == "/testurl":
+        send_message(token, chat, "⏳ Menjalankan test URL melalui proxy Anda...")
         handle_test_url(token, chat, cfg, args)
         return
 
@@ -3003,14 +3046,9 @@ def handle_message(token, update):
         if is_user_active(record):
             if update_user_profile_from_update(users, user_id, update):
                 write_users(users)
-            try:
-                set_commands_for_chat(token, user_id, USER_COMMANDS)
-            except Exception as exc:
-                log(f"Unable to refresh user commands for {user_id}: {exc}")
             handle_user_command(token, update, env, command, args, record)
             return
 
-        reconcile_user_services(env, users, token)
         require_admin_or_reply(token, update, env)
     except Exception as exc:
         log(f"Command {command} failed: {exc}")
@@ -3033,7 +3071,6 @@ def handle_callback(token, update):
     if active_user and update_user_profile_from_update(users, user_id, update):
         write_users(users)
     if not admin and not active_user:
-        reconcile_user_services(env, users, token)
         answer_callback(token, callback.get("id", ""), "Access denied")
         require_admin_or_reply(token, update, env)
         return
@@ -3125,11 +3162,24 @@ def main():
 
     offset = read_update_offset()
     last_reconcile = 0
+    update_workers = ThreadPoolExecutor(
+        max_workers=UPDATE_WORKER_COUNT,
+        thread_name_prefix="telegram-update",
+    )
+    maintenance_workers = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="bot-maintenance",
+    )
+    maintenance_future = None
+
+    log(f"Started with {UPDATE_WORKER_COUNT} Telegram update workers")
     while True:
         try:
             now = int(time.time())
-            if now - last_reconcile >= 60:
-                reconcile_user_services(load_env(), token=token)
+            if now - last_reconcile >= 60 and (
+                maintenance_future is None or maintenance_future.done()
+            ):
+                maintenance_future = maintenance_workers.submit(reconcile_job, token)
                 last_reconcile = now
 
             payload = {
@@ -3143,10 +3193,7 @@ def main():
             for update in updates:
                 offset = update["update_id"] + 1
                 write_update_offset(offset)
-                try:
-                    handle_update(token, update)
-                except Exception as exc:
-                    log(f"Update handling failed: {exc}")
+                update_workers.submit(handle_update_job, token, update)
         except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
             log(f"Polling failed: {exc}")
             time.sleep(5)
