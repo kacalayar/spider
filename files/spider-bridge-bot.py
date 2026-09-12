@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import datetime
 import html
@@ -51,6 +52,7 @@ UPDATE_WORKER_COUNT = max(4, min(16, (os.cpu_count() or 4) * 2))
 UPDATE_LOCKS = {}
 UPDATE_LOCKS_GUARD = threading.Lock()
 STATE_LOCK = threading.RLock()
+APPLY_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="proxy-apply")
 
 PROXY_TYPES = [
     "default",
@@ -162,6 +164,41 @@ def reconcile_job(token):
         reconcile_user_services(load_env(), token=token)
     except Exception as exc:
         log(f"Background service reconciliation failed: {exc}")
+
+
+def apply_config_in_background(token, chat, success_message, failure_message):
+    """Apply the current config without blocking the Telegram update worker."""
+    def job():
+        ok, output = run_apply()
+        if ok:
+            send_message(token, chat, f"{success_message}\n<code>{escape(output)}</code>")
+        else:
+            send_message(token, chat, f"{failure_message}:\n<code>{escape(output)}</code>")
+
+    APPLY_EXECUTOR.submit(job)
+
+
+def apply_user_config_in_background(token, chat, env, user_id, record, success_message, failure_message):
+    """Apply one rental user's service without blocking the Telegram worker."""
+    env_snapshot = dict(env)
+    record_snapshot = copy.deepcopy(record)
+
+    def job():
+        ok, output = apply_user_service(env_snapshot, user_id, record_snapshot)
+        if ok:
+            send_message(token, chat, f"{success_message}\n<code>{escape(output)}</code>")
+        else:
+            send_message(token, chat, f"{failure_message}:\n<code>{escape(output)}</code>")
+
+    APPLY_EXECUTOR.submit(job)
+
+
+def cached_country_validation(country):
+    """Validate against local cache only; never block config commands on HTTP."""
+    if not country:
+        return True
+    countries, _fetched_at = read_countries_cache()
+    return not countries or country in countries
 
 
 def escape(value):
@@ -2209,8 +2246,7 @@ def handle_set_country(token, chat, env, value):
         return
 
     if normalized:
-        countries, source, error = get_spider_countries(force_refresh=False)
-        if countries and normalized not in countries:
+        if not cached_country_validation(normalized):
             send_message(
                 token,
                 chat,
@@ -2218,20 +2254,17 @@ def handle_set_country(token, chat, env, value):
                 f"Jalankan <code>/refreshcountries</code> atau cek kode country-nya.",
             )
             return
-        if not countries and error:
-            send_message(
-                token,
-                chat,
-                f"Tidak bisa validasi daftar country dari Spider ({escape(error)}). Config tetap dicoba.",
-            )
 
     env["SPIDER_COUNTRY_CODE"] = normalized
     save_env(env)
-    ok, output = run_apply()
-    if ok:
-        send_message(token, chat, f"Country diubah ke <code>{escape(normalized or 'default')}</code>.\n<code>{escape(output)}</code>")
-    else:
-        send_message(token, chat, f"Gagal apply config:\n<code>{escape(output)}</code>")
+    country_text = escape(normalized or "default")
+    send_message(token, chat, f"Country disimpan ke <code>{country_text}</code>. Apply berjalan di background...")
+    apply_config_in_background(
+        token,
+        chat,
+        f"Country berhasil diterapkan: <code>{country_text}</code>.",
+        "Gagal apply country",
+    )
 
 
 def handle_set_user_country(token, chat, env, value):
@@ -2242,8 +2275,7 @@ def handle_set_user_country(token, chat, env, value):
         return
 
     if normalized:
-        countries, source, error = get_spider_countries(force_refresh=False)
-        if countries and normalized not in countries:
+        if not cached_country_validation(normalized):
             send_message(
                 token,
                 chat,
@@ -2251,12 +2283,6 @@ def handle_set_user_country(token, chat, env, value):
                 f"Jalankan <code>/refreshcountries</code> atau cek kode country-nya.",
             )
             return
-        if not countries and error:
-            send_message(
-                token,
-                chat,
-                f"Tidak bisa validasi daftar country dari Spider ({escape(error)}). Config tetap disimpan.",
-            )
 
     env["USER_DEFAULT_COUNTRY_CODE"] = normalized
     save_env(env)
@@ -2277,11 +2303,13 @@ def handle_set_country_param(token, chat, env, value):
 
     env["SPIDER_COUNTRY_PARAM"] = normalized
     save_env(env)
-    ok, output = run_apply()
-    if ok:
-        send_message(token, chat, f"Country param diubah ke <code>{escape(normalized)}</code>.\n<code>{escape(output)}</code>")
-    else:
-        send_message(token, chat, f"Gagal apply config:\n<code>{escape(output)}</code>")
+    send_message(token, chat, f"Country param disimpan ke <code>{escape(normalized)}</code>. Apply berjalan di background...")
+    apply_config_in_background(
+        token,
+        chat,
+        f"Country param berhasil diterapkan: <code>{escape(normalized)}</code>.",
+        "Gagal apply country param",
+    )
 
 
 def handle_set_proxy(token, chat, env, value):
@@ -2295,11 +2323,13 @@ def handle_set_proxy(token, chat, env, value):
 
     env["SPIDER_PROXY_TYPE"] = normalized
     save_env(env)
-    ok, output = run_apply()
-    if ok:
-        send_message(token, chat, f"Pool diubah ke <code>{escape(normalized)}</code>.\n<code>{escape(output)}</code>")
-    else:
-        send_message(token, chat, f"Gagal apply config:\n<code>{escape(output)}</code>")
+    send_message(token, chat, f"Pool disimpan ke <code>{escape(normalized)}</code>. Apply berjalan di background...")
+    apply_config_in_background(
+        token,
+        chat,
+        f"Pool berhasil diterapkan: <code>{escape(normalized)}</code>.",
+        "Gagal apply pool",
+    )
 
 
 def handle_set_engine(token, chat, env, args):
@@ -2316,24 +2346,14 @@ def handle_set_engine(token, chat, env, args):
     env["SPIDER_UPSTREAM_SCHEME"] = "socks5"
     env["SPIDER_UPSTREAM_PORT"] = default_upstream_port("socks5")
 
-    send_message(
+    save_env(env)
+    send_message(token, chat, "Engine disimpan sebagai <code>gost</code>. Apply berjalan di background...")
+    apply_config_in_background(
         token,
         chat,
-        f"Menerapkan engine <code>gost</code> dengan upstream <code>{escape(upstream_endpoint(env))}</code>...",
+        "Engine <code>gost</code> berhasil diterapkan.",
+        "Gagal apply engine",
     )
-    save_env(env)
-
-    ok, output = run_apply()
-    if ok:
-        send_message(
-            token,
-            chat,
-            "Engine diubah ke <code>gost</code>.\n"
-            f"<code>{escape(output)}</code>\n\n"
-            "Jalankan <code>/status</code> atau <code>/testurl https://whoer.net</code>.",
-        )
-    else:
-        send_message(token, chat, f"Gagal apply engine:\n<code>{escape(output)}</code>")
 
 
 def handle_set_upstream(token, chat, env, args):
@@ -2357,24 +2377,15 @@ def handle_set_upstream(token, chat, env, args):
     env["SPIDER_UPSTREAM_SCHEME"] = scheme
     env["SPIDER_UPSTREAM_PORT"] = port
     env["BRIDGE_ENGINE"] = "gost"
-    send_message(
+    save_env(env)
+    endpoint = escape(upstream_endpoint(env))
+    send_message(token, chat, f"Upstream disimpan ke <code>{endpoint}</code>. Apply berjalan di background...")
+    apply_config_in_background(
         token,
         chat,
-        f"Menerapkan upstream Spider ke <code>{escape(upstream_endpoint(env))}</code> dengan engine <code>{escape(bridge_engine(env))}</code>...",
+        f"Upstream berhasil diterapkan: <code>{endpoint}</code>.",
+        "Gagal apply upstream",
     )
-    save_env(env)
-
-    ok, output = run_apply()
-    if ok:
-        send_message(
-            token,
-            chat,
-            f"Upstream Spider diubah ke <code>{escape(upstream_endpoint(env))}</code>.\n"
-            f"<code>{escape(output)}</code>\n\n"
-            "Jalankan <code>/status</code> untuk melihat exit IP live.",
-        )
-    else:
-        send_message(token, chat, f"Gagal apply upstream:\n<code>{escape(output)}</code>")
 
 
 def handle_test(token, chat, env):
@@ -2684,12 +2695,9 @@ def handle_user_set_country(token, chat, env, user_id, value, admin=False):
         return
 
     if normalized:
-        countries, source, error = get_spider_countries(force_refresh=False)
-        if countries and normalized not in countries:
+        if not cached_country_validation(normalized):
             send_message(token, chat, f"Country <code>{escape(normalized)}</code> tidak ada di daftar Spider saat ini.")
             return
-        if not countries and error:
-            send_message(token, chat, f"Tidak bisa validasi country dari Spider ({escape(error)}). Config tetap dicoba.")
 
     users = read_users()
     user_id = str(user_id)
@@ -2702,16 +2710,19 @@ def handle_user_set_country(token, chat, env, user_id, value, admin=False):
         return
     record["country"] = normalized
     record["updated_at"] = int(time.time())
-    ok, output = apply_user_service(env, user_id, record)
-    if ok:
-        write_users(users)
-        if admin:
-            send_message(token, chat, f"Country user <code>{escape(user_id)}</code> diubah ke <code>{escape(normalized or 'default')}</code>.\n<code>{escape(output)}</code>")
-        else:
-            send_message(token, chat, f"Country proxy Anda diubah ke <code>{escape(normalized or 'default')}</code>.\n<code>{escape(output)}</code>")
-    else:
-        target = f"user <code>{escape(user_id)}</code>" if admin else "proxy Anda"
-        send_message(token, chat, f"Gagal apply {target}:\n<code>{escape(output)}</code>")
+    write_users(users)
+    country_text = escape(normalized or "default")
+    target = f"user <code>{escape(user_id)}</code>" if admin else "proxy Anda"
+    send_message(token, chat, f"Country {target} disimpan ke <code>{country_text}</code>. Apply berjalan di background...")
+    apply_user_config_in_background(
+        token,
+        chat,
+        env,
+        user_id,
+        record,
+        f"Country {target} berhasil diterapkan: <code>{country_text}</code>.",
+        f"Gagal apply country {target}",
+    )
 
 
 def handle_user_set_proxy(token, chat, env, user_id, value):
@@ -2729,12 +2740,18 @@ def handle_user_set_proxy(token, chat, env, user_id, value):
         return
     record["pool"] = normalized
     record["updated_at"] = int(time.time())
-    ok, output = apply_user_service(env, user_id, record)
-    if ok:
-        write_users(users)
-        send_message(token, chat, f"Pool proxy Anda diubah ke <code>{escape(normalized)}</code>.\n<code>{escape(output)}</code>")
-    else:
-        send_message(token, chat, f"Gagal apply proxy Anda:\n<code>{escape(output)}</code>")
+    write_users(users)
+    pool_text = escape(normalized)
+    send_message(token, chat, f"Pool proxy Anda disimpan ke <code>{pool_text}</code>. Apply berjalan di background...")
+    apply_user_config_in_background(
+        token,
+        chat,
+        env,
+        user_id,
+        record,
+        f"Pool proxy Anda berhasil diterapkan: <code>{pool_text}</code>.",
+        "Gagal apply proxy Anda",
+    )
 
 
 def handle_admin_command(token, update, env, command, args):
@@ -2826,9 +2843,7 @@ def handle_admin_command(token, update, env, command, args):
 
     if command == "/apply":
         send_message(token, chat, "⏳ Menerapkan konfigurasi dan merestart proxy...")
-        ok, output = run_apply()
-        prefix = "Apply berhasil" if ok else "Apply gagal"
-        send_message(token, chat, f"{prefix}:\n<code>{escape(output)}</code>")
+        apply_config_in_background(token, chat, "Apply berhasil.", "Apply gagal")
         return
 
     if command == "/restartbot":
@@ -2848,9 +2863,8 @@ def handle_admin_command(token, update, env, command, args):
             return
         env["LOCAL_PROXY_PASS"] = args[0]
         save_env(env)
-        ok, output = run_apply()
-        prefix = "Password lokal diubah" if ok else "Gagal apply password lokal"
-        send_message(token, chat, f"{prefix}:\n<code>{escape(output)}</code>")
+        send_message(token, chat, "Password lokal disimpan. Apply berjalan di background...")
+        apply_config_in_background(token, chat, "Password lokal berhasil diterapkan.", "Gagal apply password lokal")
         return
 
     if command == "/setlocaluser":
@@ -2859,9 +2873,8 @@ def handle_admin_command(token, update, env, command, args):
             return
         env["LOCAL_PROXY_USER"] = args[0]
         save_env(env)
-        ok, output = run_apply()
-        prefix = "User lokal diubah" if ok else "Gagal apply user lokal"
-        send_message(token, chat, f"{prefix}:\n<code>{escape(output)}</code>")
+        send_message(token, chat, "User lokal disimpan. Apply berjalan di background...")
+        apply_config_in_background(token, chat, "User lokal berhasil diterapkan.", "Gagal apply user lokal")
         return
 
     if command == "/setport":
@@ -2875,9 +2888,8 @@ def handle_admin_command(token, update, env, command, args):
             return
         env["LOCAL_PROXY_PORT"] = args[0]
         save_env(env)
-        ok, output = run_apply()
-        prefix = "Port lokal diubah" if ok else "Gagal apply port lokal"
-        send_message(token, chat, f"{prefix}:\n<code>{escape(output)}</code>")
+        send_message(token, chat, "Port lokal disimpan. Apply berjalan di background...")
+        apply_config_in_background(token, chat, "Port lokal berhasil diterapkan.", "Gagal apply port lokal")
         return
 
     if command == "/sethost":
